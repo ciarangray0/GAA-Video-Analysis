@@ -7,8 +7,8 @@ from pathlib import Path
 INPUT_DIR = "/Users/ciarangray/Desktop/FYP/Data/Ballyteague/Veo highlights Ballyteague League"    # folder containing the mp4 clips
 OUTPUT_DIR = "/Users/ciarangray/Desktop/FYP/Data/Ballyteague/Frames"
 CSV_PATH = "/Users/ciarangray/Desktop/FYP/Data/Ballyteague/frame_index.csv"      # list of frames extracted
-FRAMES_PER_CLIP = 75             # how many frames to sample from each clip (set to None for fps sampling)
-SAMPLE_FPS = 5                # alternatively, set to e.g. 3 to sample 3 frames/sec (takes priority if not None)
+FRAMES_PER_CLIP = 75             # how many frames to sample from each clip
+SAMPLE_FPS = 5              # set to desired fps to sample at (overrides FRAMES_PER_CLIP if set), set to None to disable
 VIDEO_EXTS = ".mp4"
 
 # ======================
@@ -35,11 +35,11 @@ with open(CSV_PATH, "w", newline="") as csvfile:
         duration = total_frames / fps
 
         if SAMPLE_FPS:
-            # Sample every N frames based on desired sampling fps
+            # sample every n  frames
             step = int(round(fps / SAMPLE_FPS))
             frame_indices = list(range(0, total_frames, step))
         else:
-            # Evenly space FRAMES_PER_CLIP frames across clip
+            # ideally evenly space FRAMES_PER_CLIP frames across clip
             step = max(1, total_frames // FRAMES_PER_CLIP)
             frame_indices = list(range(0, total_frames, step))[:FRAMES_PER_CLIP]
 
