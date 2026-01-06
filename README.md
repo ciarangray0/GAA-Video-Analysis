@@ -1,6 +1,3 @@
-# GAA Player Detection Comptuter Vision Pipeline
-
-
 # GAA Player Detection Computer Vision Pipeline
 
 A 4th year BSc Computer Science project that processes Veo-recorded GAA matches to detect players, track movement, and extract match statistics.
