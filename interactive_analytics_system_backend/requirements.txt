@@ -1,0 +1,25 @@
+# Core
+numpy
+pandas
+opencv-python
+
+# YOLO + ByteTrack
+ultralytics
+
+# API backend
+fastapi
+uvicorn
+
+# Data & serialization
+pydantic
+
+# Visualization / debugging (optional but useful)
+matplotlib
+
+# Video handling
+imageio
+imageio-ffmpeg
+
+# Frontend
+streamlit
+requests
