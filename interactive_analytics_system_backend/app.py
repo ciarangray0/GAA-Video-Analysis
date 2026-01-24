@@ -9,6 +9,7 @@ import logging
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from pipeline.schemas import (
     VideoCreateResponse,
@@ -25,7 +26,7 @@ from pipeline.schemas import (
 from pipeline.homography import compute_homographies_from_annotations
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
-from pipeline.video import get_video_metadata
+from pipeline.video import get_video_metadata, extract_frame
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -179,7 +180,10 @@ async def upload_video(file: UploadFile = File(...)):
     videos[video_id] = {
         "path": str(video_path),
         "fps": metadata["fps"],
-        "num_frames": metadata["num_frames"]
+        "num_frames": metadata["num_frames"],
+        "width": metadata["width"],
+        "height": metadata["height"],
+        "duration_seconds": metadata["duration_seconds"]
     }
     
     logger.info(f"Uploaded video {video_id}: {metadata['num_frames']} frames at {metadata['fps']} fps")
@@ -187,8 +191,50 @@ async def upload_video(file: UploadFile = File(...)):
     return VideoCreateResponse(
         video_id=video_id,
         fps=metadata["fps"],
-        num_frames=metadata["num_frames"]
+        num_frames=metadata["num_frames"],
+        width=metadata["width"],
+        height=metadata["height"],
+        duration_seconds=metadata["duration_seconds"]
     )
+
+
+@app.get("/videos/{video_id}/frame/{frame_idx}")
+async def get_frame(video_id: str, frame_idx: int):
+    """
+    Extract and return a single frame from a video as JPEG image.
+
+    Args:
+        video_id: Video identifier
+        frame_idx: Frame index to extract (0-based)
+
+    Returns:
+        JPEG image of the frame
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_info = videos[video_id]
+
+    # Validate frame index
+    if frame_idx < 0 or frame_idx >= video_info["num_frames"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Frame index must be between 0 and {video_info['num_frames'] - 1}"
+        )
+
+    try:
+        frame_bytes = extract_frame(video_info["path"], frame_idx)
+        if frame_bytes is None:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        return Response(
+            content=frame_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "max-age=3600"}
+        )
+    except Exception as e:
+        logger.error(f"Failed to extract frame {frame_idx} from video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to extract frame")
 
 
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
@@ -410,7 +456,9 @@ async def get_player_positions(video_id: str):
 @app.post("/process-video", response_model=ProcessVideoResponse)
 async def process_video(
     file: UploadFile = File(...),
-    annotations_json: str = Form(..., description="JSON string of pitch annotations for anchor frames")
+    annotations_json: str = Form(..., description="JSON string of pitch annotations for anchor frames"),
+    start_frame: int = Form(0, description="First frame to process (for trimming)"),
+    end_frame: Optional[int] = Form(None, description="Last frame to process (for trimming), None means end of video")
 ):
     """
     Unified endpoint to process a video through the entire pipeline.
@@ -426,6 +474,8 @@ async def process_video(
     Args:
         file: MP4 video file
         annotations_json: JSON string of pitch annotations for anchor frames
+        start_frame: First frame to process (for trimming)
+        end_frame: Last frame to process (for trimming), None means end of video
 
     Returns:
         ProcessVideoResponse with video_id, status, and player_positions
@@ -494,12 +544,18 @@ async def process_video(
         player_positions_cache[video_id] = positions
         
         # Step 5: Interpolate trajectories
-        # Get frame range from video metadata
+        # Use provided frame range, or default to full video
         num_frames = metadata["num_frames"]
-        interpolated = interpolate_trajectories(positions, 0, num_frames - 1)
-        
+        actual_start = max(0, start_frame)
+        actual_end = min(num_frames - 1, end_frame) if end_frame is not None else num_frames - 1
+
+        # Filter positions to the requested frame range
+        positions_in_range = [p for p in positions if actual_start <= p.frame_idx <= actual_end]
+
+        interpolated = interpolate_trajectories(positions_in_range, actual_start, actual_end)
+
         # Combine sparse and interpolated positions
-        all_positions = positions + [
+        all_positions = positions_in_range + [
             p for p in interpolated if p.source == "interpolated"
         ]
         

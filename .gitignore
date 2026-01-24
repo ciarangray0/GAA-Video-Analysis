@@ -58,6 +58,15 @@ htmlcov/
 *.log
 logs/
 
+# Large model files
+*.pt
+*.pth
+*.pkl
+*.h5
+*.onnx
+*.pb
+*.tflite
+
 # Data directories (runtime generated)
 **/data/videos/
 **/data/tracks/

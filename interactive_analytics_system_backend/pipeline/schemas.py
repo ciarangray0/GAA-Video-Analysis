@@ -41,6 +41,9 @@ class VideoCreateResponse(BaseModel):
     video_id: str
     fps: int
     num_frames: int
+    width: int
+    height: int
+    duration_seconds: float
 
 
 class TrackResponse(BaseModel):
