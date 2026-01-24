@@ -63,7 +63,3 @@ logs/
 .env.local
 .env.*.local
 
-# Model files (download separately or mount as volume)
-# Uncomment if you want to exclude model files from git:
-# models/*.pt
-

@@ -233,25 +233,33 @@ export default function Home() {
     if (!videoMetadata) return
 
     setLoadingFrame(true)
+    setError('')
 
     try {
       const url = `${API_URL}/videos/${videoMetadata.video_id}/frame/${frameIdx}`
       setFrameImageUrl(url)
 
-      // Preload the image
+      // Create and load the image
       const img = new Image()
       img.crossOrigin = 'anonymous'
+
       img.onload = () => {
+        console.log(`Frame ${frameIdx} loaded: ${img.naturalWidth}x${img.naturalHeight}`)
         frameImageRef.current = img
-        drawFrameWithPoints()
+        setLoadingFrame(false)
+        // Draw will be triggered by useEffect when loadingFrame changes
+      }
+
+      img.onerror = (e) => {
+        console.error(`Failed to load frame ${frameIdx}:`, e)
+        setError(`Failed to load frame ${frameIdx}. Check if backend is running.`)
         setLoadingFrame(false)
       }
-      img.onerror = () => {
-        setError(`Failed to load frame ${frameIdx}`)
-        setLoadingFrame(false)
-      }
-      img.src = url
+
+      // Add cache-busting parameter to avoid stale images
+      img.src = `${url}?t=${Date.now()}`
     } catch (err) {
+      console.error('Failed to load frame:', err)
       setError('Failed to load frame')
       setLoadingFrame(false)
     }
@@ -263,14 +271,20 @@ export default function Home() {
     const img = frameImageRef.current
     if (!canvas || !img || anchorFrames.length === 0) return
 
+    // Check if image is actually loaded
+    if (!img.complete || img.naturalWidth === 0) {
+      console.log('Image not yet loaded, waiting...')
+      return
+    }
+
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    // Set canvas size to match image (scaled down if needed)
-    const maxWidth = 800
-    const scale = Math.min(1, maxWidth / img.width)
-    canvas.width = img.width * scale
-    canvas.height = img.height * scale
+    // Set canvas size to match image (scaled down if needed) - increased max width
+    const maxWidth = 1000
+    const scale = Math.min(1, maxWidth / img.naturalWidth)
+    canvas.width = img.naturalWidth * scale
+    canvas.height = img.naturalHeight * scale
 
     // Draw image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
@@ -278,9 +292,10 @@ export default function Home() {
     // Draw annotation points for current anchor frame
     const currentAnchor = anchorFrames[currentAnchorIdx]
     if (currentAnchor && currentAnchor.points) {
-      currentAnchor.points.forEach((point, idx) => {
-        const x = point.x_img * scale
-        const y = point.y_img * scale
+      const imgScale = canvas.width / img.naturalWidth
+      currentAnchor.points.forEach((point) => {
+        const x = point.x_img * imgScale
+        const y = point.y_img * imgScale
 
         // Draw point
         ctx.fillStyle = '#ff0000'
@@ -306,10 +321,11 @@ export default function Home() {
     const canvas = frameCanvasRef.current
     const img = frameImageRef.current
     if (!canvas || !img || anchorFrames.length === 0) return
+    if (!img.naturalWidth || !img.naturalHeight) return
 
     const rect = canvas.getBoundingClientRect()
-    const scaleX = img.width / canvas.width
-    const scaleY = img.height / canvas.height
+    const scaleX = img.naturalWidth / canvas.width
+    const scaleY = img.naturalHeight / canvas.height
 
     const x = (e.clientX - rect.left) * scaleX
     const y = (e.clientY - rect.top) * scaleY
@@ -664,12 +680,12 @@ export default function Home() {
     ctx.fillText(`Players: ${framePositions.length}`, 10, 50)
   }
 
-  // Redraw frame when annotations change
+  // Redraw frame when annotations change or image loads
   useEffect(() => {
-    if (frameImageRef.current && anchorFrames.length > 0) {
+    if (!loadingFrame && frameImageRef.current && anchorFrames.length > 0) {
       drawFrameWithPoints()
     }
-  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints])
+  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame])
 
   // Redraw pitch diagram when pending click changes or annotations change
   useEffect(() => {

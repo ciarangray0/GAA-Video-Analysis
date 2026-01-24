@@ -3,8 +3,11 @@ numpy>=1.24.0
 pandas>=2.0.0
 opencv-python-headless>=4.8.0  # Headless for server deployment
 
-# YOLO + ByteTrack (CPU-only)
+# YOLO + ByteTrack
 ultralytics>=8.0.0
+
+# PyTorch CPU-only builds (avoids downloading ~2GB of NVIDIA CUDA packages)
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.0.0
 torchvision>=0.15.0
 
