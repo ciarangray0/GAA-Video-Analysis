@@ -324,11 +324,22 @@ export default function Home() {
     if (!img.naturalWidth || !img.naturalHeight) return
 
     const rect = canvas.getBoundingClientRect()
-    const scaleX = img.naturalWidth / canvas.width
-    const scaleY = img.naturalHeight / canvas.height
 
-    const x = (e.clientX - rect.left) * scaleX
-    const y = (e.clientY - rect.top) * scaleY
+    // Calculate click position relative to canvas display size
+    const clickX = e.clientX - rect.left
+    const clickY = e.clientY - rect.top
+
+    // Scale from CSS display size to canvas internal size
+    const cssToCanvasX = canvas.width / rect.width
+    const cssToCanvasY = canvas.height / rect.height
+
+    // Then scale from canvas size to original image size
+    const canvasToImageX = img.naturalWidth / canvas.width
+    const canvasToImageY = img.naturalHeight / canvas.height
+
+    // Final coordinates in original image space
+    const x = clickX * cssToCanvasX * canvasToImageX
+    const y = clickY * cssToCanvasY * canvasToImageY
 
     // Store the pending frame click - user must now click on pitch diagram
     setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
@@ -342,8 +353,12 @@ export default function Home() {
     if (!canvas) return
 
     const rect = canvas.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const clickY = e.clientY - rect.top
+
+    // Calculate click position relative to canvas display size, then scale to internal size
+    const cssToCanvasX = canvas.width / rect.width
+    const cssToCanvasY = canvas.height / rect.height
+    const clickX = (e.clientX - rect.left) * cssToCanvasX
+    const clickY = (e.clientY - rect.top) * cssToCanvasY
 
     // Find closest pitch vertex
     let closestId: string | null = null
