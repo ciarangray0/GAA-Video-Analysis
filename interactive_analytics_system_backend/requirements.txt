@@ -1,25 +1,21 @@
 # Core
-numpy
-pandas
-opencv-python
+numpy>=1.24.0
+pandas>=2.0.0
+opencv-python-headless>=4.8.0  # Headless for server deployment
 
-# YOLO + ByteTrack
-ultralytics
+# YOLO + ByteTrack (CPU-only)
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
 
 # API backend
-fastapi
-uvicorn
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6  # Required for file uploads
 
 # Data & serialization
-pydantic
-
-# Visualization / debugging (optional but useful)
-matplotlib
+pydantic>=2.0.0
 
 # Video handling
-imageio
-imageio-ffmpeg
-
-# Frontend
-streamlit
-requests
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9

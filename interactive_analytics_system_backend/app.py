@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import json
 import numpy as np
+import logging
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 
 from pipeline.schemas import (
@@ -17,27 +17,38 @@ from pipeline.schemas import (
     HomographyResponse,
     InterpolationResponse,
     Detection,
-    PlayerPitchPosition
+    PlayerPitchPosition,
+    ProcessVideoResponse
 )
-from pipeline.detect import run_tracking
+# NOTE: `run_tracking` performs heavy ML imports; import lazily inside endpoints to keep module import lightweight.
+# from pipeline.detect import run_tracking
 from pipeline.homography import compute_homographies_from_annotations
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration from environment variables
+MAX_VIDEO_SIZE_MB = int(os.getenv("MAX_VIDEO_SIZE_MB", "500"))
+MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024  # Convert to bytes
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+
 app = FastAPI(title="GAA Video Analysis API")
 
-# Enable CORS for Streamlit frontend
+# Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your Streamlit URL
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Data directories
-DATA_DIR = Path("data")
 VIDEOS_DIR = DATA_DIR / "videos"
 TRACKS_DIR = DATA_DIR / "tracks"
 ANNOTATIONS_DIR = DATA_DIR / "annotations"
@@ -54,11 +65,43 @@ homographies_cache: Dict[str, Dict[int, any]] = {}
 player_positions_cache: Dict[str, List[PlayerPitchPosition]] = {}
 
 
+# --- Health Check ---
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration."""
+    return {"status": "ok"}
+
+
+# --- Helper Functions ---
+def validate_video_upload(file: UploadFile, content: bytes) -> None:
+    """Validate uploaded video file."""
+    # Check file size
+    if len(content) > MAX_VIDEO_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_VIDEO_SIZE_MB}MB"
+        )
+
+    # Check file extension
+    if not file.filename or not file.filename.lower().endswith(".mp4"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only MP4 video files are accepted"
+        )
+
+    # Check MIME type if provided
+    if file.content_type and file.content_type not in ["video/mp4", "application/octet-stream"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content type: {file.content_type}. Expected video/mp4"
+        )
+
+
 def save_detections(video_id: str, detections: List[Detection]):
     """Save detections to JSON file."""
     file_path = TRACKS_DIR / f"{video_id}.json"
     with open(file_path, "w") as f:
-        json.dump([d.dict() for d in detections], f, indent=2)
+        json.dump([d.model_dump() for d in detections], f, indent=2)
 
 
 def load_detections(video_id: str) -> Optional[List[Detection]]:
@@ -91,6 +134,17 @@ def load_homographies(video_id: str) -> Optional[Dict[int, any]]:
     return None
 
 
+def sanitize_error_message(error: Exception) -> str:
+    """Sanitize error messages for client responses."""
+    # In production, you may want to log the full error and return a generic message
+    error_str = str(error)
+    # Remove file paths from error messages
+    if "data/" in error_str or "/Users/" in error_str or "/home/" in error_str:
+        return "An internal error occurred"
+    return error_str
+
+
+# --- Endpoints ---
 @app.post("/videos", response_model=VideoCreateResponse)
 async def upload_video(file: UploadFile = File(...)):
     """
@@ -98,13 +152,18 @@ async def upload_video(file: UploadFile = File(...)):
     
     Returns video_id, fps, and num_frames.
     """
+    # Read file content
+    content = await file.read()
+
+    # Validate upload
+    validate_video_upload(file, content)
+
     # Generate unique video ID
     video_id = str(uuid.uuid4())
     
     # Save video file
     video_path = VIDEOS_DIR / f"{video_id}.mp4"
     with open(video_path, "wb") as f:
-        content = await file.read()
         f.write(content)
     
     # Extract metadata
@@ -113,8 +172,9 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         # Clean up file on error
         video_path.unlink()
-        raise HTTPException(status_code=400, detail=f"Failed to process video: {str(e)}")
-    
+        logger.error(f"Failed to process video {video_id}: {e}")
+        raise HTTPException(status_code=400, detail="Failed to process video. Ensure it is a valid MP4 file.")
+
     # Store video info
     videos[video_id] = {
         "path": str(video_path),
@@ -122,6 +182,8 @@ async def upload_video(file: UploadFile = File(...)):
         "num_frames": metadata["num_frames"]
     }
     
+    logger.info(f"Uploaded video {video_id}: {metadata['num_frames']} frames at {metadata['fps']} fps")
+
     return VideoCreateResponse(
         video_id=video_id,
         fps=metadata["fps"],
@@ -146,23 +208,28 @@ async def track_video(video_id: str):
     if detections is None:
         # Run tracking
         try:
+            from pipeline.detect import run_tracking  # Import here to avoid top-level ML imports
+            logger.info(f"Running tracking on video {video_id}")
             detections = run_tracking(video_path)
             detections_cache[video_id] = detections
             save_detections(video_id, detections)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Tracking failed: {str(e)}")
+            logger.error(f"Tracking failed for video {video_id}: {e}")
+            raise HTTPException(status_code=500, detail="Tracking failed. Please try again.")
     else:
         detections_cache[video_id] = detections
     
     if not detections:
-        raise HTTPException(status_code=500, detail="No detections found")
-    
+        raise HTTPException(status_code=500, detail="No detections found in video")
+
     # Count unique tracks
     unique_tracks = len(set(d.track_id for d in detections))
     
     # Count frames processed
     frames_processed = max(d.frame_idx for d in detections) + 1
     
+    logger.info(f"Tracking complete for {video_id}: {frames_processed} frames, {unique_tracks} tracks")
+
     return TrackResponse(
         frames_processed=frames_processed,
         tracks=unique_tracks
@@ -194,11 +261,14 @@ async def compute_homographies(
         homographies_cache[video_id] = homographies
         save_homographies(video_id, homographies)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Homography computation failed: {str(e)}")
-    
+        logger.error(f"Homography computation failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail="Homography computation failed")
+
     if not homographies:
-        raise HTTPException(status_code=400, detail="No valid homographies computed")
-    
+        raise HTTPException(status_code=400, detail="No valid homographies computed. Need at least 4 points per frame.")
+
+    logger.info(f"Computed {len(homographies)} homographies for video {video_id}")
+
     return HomographyResponse(frames=sorted(homographies.keys()))
 
 
@@ -227,8 +297,11 @@ async def map_players(video_id: str):
         positions = map_players_to_pitch(detections, homographies)
         player_positions_cache[video_id] = positions
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Player mapping failed: {str(e)}")
-    
+        logger.error(f"Player mapping failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail="Player mapping failed")
+
+    logger.info(f"Mapped {len(positions)} player positions for video {video_id}")
+
     return positions
 
 
@@ -252,6 +325,10 @@ async def interpolate_trajectories_endpoint(
     if video_id not in videos:
         raise HTTPException(status_code=404, detail="Video not found")
     
+    # Validate frame range
+    if start_frame < 0 or end_frame < start_frame:
+        raise HTTPException(status_code=400, detail="Invalid frame range")
+
     # Get sparse positions (from mapping)
     sparse_positions = player_positions_cache.get(video_id)
     if sparse_positions is None:
@@ -296,8 +373,11 @@ async def interpolate_trajectories_endpoint(
         ])
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Interpolation failed: {str(e)}")
-    
+        logger.error(f"Interpolation failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail="Interpolation failed")
+
+    logger.info(f"Generated {frames_generated} interpolated frames for video {video_id}")
+
     return InterpolationResponse(
         frames_generated=frames_generated,
         method="linear"
@@ -325,3 +405,121 @@ async def get_player_positions(video_id: str):
     positions_sorted = sorted(positions, key=lambda p: (p.frame_idx, p.track_id))
     
     return positions_sorted
+
+
+@app.post("/process-video", response_model=ProcessVideoResponse)
+async def process_video(
+    file: UploadFile = File(...),
+    annotations_json: str = Form(..., description="JSON string of pitch annotations for anchor frames")
+):
+    """
+    Unified endpoint to process a video through the entire pipeline.
+    
+    Steps:
+    1. Upload video
+    2. Run YOLOv8n + ByteTrack tracking
+    3. Compute homographies at anchor frames
+    4. Map players to pitch coordinates
+    5. Interpolate player trajectories
+    6. Return JSON pitch coordinates
+    
+    Args:
+        file: MP4 video file
+        annotations_json: JSON string of pitch annotations for anchor frames
+
+    Returns:
+        ProcessVideoResponse with video_id, status, and player_positions
+    """
+    # Read and validate file
+    content = await file.read()
+    validate_video_upload(file, content)
+
+    # Step 1: Upload video
+    video_id = str(uuid.uuid4())
+    video_path = VIDEOS_DIR / f"{video_id}.mp4"
+    
+    try:
+        with open(video_path, "wb") as f:
+            f.write(content)
+        
+        # Extract metadata
+        metadata = get_video_metadata(str(video_path))
+        videos[video_id] = {
+            "path": str(video_path),
+            "fps": metadata["fps"],
+            "num_frames": metadata["num_frames"]
+        }
+        logger.info(f"Processing video {video_id}: {metadata['num_frames']} frames")
+    except Exception as e:
+        if video_path.exists():
+            video_path.unlink()
+        logger.error(f"Failed to upload video: {e}")
+        raise HTTPException(status_code=400, detail="Failed to upload video. Ensure it is a valid MP4 file.")
+
+    try:
+        # Step 2: Run YOLOv8n + ByteTrack tracking
+        from pipeline.detect import run_tracking  # Import here to avoid top-level ML imports
+        logger.info(f"Running tracking on video {video_id}")
+        detections = run_tracking(str(video_path))
+        if not detections:
+            raise HTTPException(status_code=500, detail="No detections found in video")
+
+        detections_cache[video_id] = detections
+        save_detections(video_id, detections)
+        
+        # Step 3: Compute homographies at anchor frames
+        # Parse annotations JSON
+        try:
+            annotations_list = json.loads(annotations_json)
+            annotations = [PitchAnnotation(**ann) for ann in annotations_list]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid annotations format. Expected JSON array of PitchAnnotation objects.")
+
+        annotations_dict = {}
+        for ann in annotations:
+            annotations_dict[ann.frame_idx] = ann.points
+        
+        homographies = compute_homographies_from_annotations(annotations_dict)
+        if not homographies:
+            raise HTTPException(status_code=400, detail="No valid homographies computed. Need at least 4 points per frame.")
+        
+        homographies_cache[video_id] = homographies
+        save_homographies(video_id, homographies)
+        
+        # Step 4: Map players to pitch coordinates
+        positions = map_players_to_pitch(detections, homographies)
+        if not positions:
+            raise HTTPException(status_code=500, detail="Failed to map players to pitch")
+        
+        player_positions_cache[video_id] = positions
+        
+        # Step 5: Interpolate trajectories
+        # Get frame range from video metadata
+        num_frames = metadata["num_frames"]
+        interpolated = interpolate_trajectories(positions, 0, num_frames - 1)
+        
+        # Combine sparse and interpolated positions
+        all_positions = positions + [
+            p for p in interpolated if p.source == "interpolated"
+        ]
+        
+        # Sort by frame_idx, then track_id
+        all_positions_sorted = sorted(all_positions, key=lambda p: (p.frame_idx, p.track_id))
+        player_positions_cache[video_id] = all_positions_sorted
+        
+        logger.info(f"Processing complete for video {video_id}: {len(all_positions_sorted)} positions")
+
+        return ProcessVideoResponse(
+            video_id=video_id,
+            status="completed",
+            player_positions=all_positions_sorted
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Cleanup on error
+        if video_path.exists():
+            video_path.unlink()
+        logger.error(f"Processing failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail="Processing failed. Please try again.")

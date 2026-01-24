@@ -1,11 +1,19 @@
 services:
   - type: web
-    name: gaa-video-analysis-backend
+    name: gaa-video-analysis-api
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
       - key: YOLO_MODEL_PATH
-        value: yolov8n.pt
-      - key: PORT
-        value: 8000
+        value: models/best.pt
+      - key: ALLOWED_ORIGINS
+        sync: false  # Set this in Render dashboard to your frontend URL
+      - key: MAX_VIDEO_SIZE_MB
+        value: "100"  # Reduced for free tier memory limits
+      - key: DATA_DIR
+        value: data

@@ -1,7 +1,6 @@
 """YOLO + ByteTrack detection and tracking."""
 from typing import List
 import numpy as np
-from ultralytics import YOLO
 
 from pipeline.schemas import Detection
 from pipeline.config import YOLO_MODEL_PATH, DEFAULT_CONF
@@ -27,15 +26,25 @@ def run_tracking(
         model_path = YOLO_MODEL_PATH
     if conf is None:
         conf = DEFAULT_CONF
-    
+
+    # Import YOLO lazily to avoid heavy dependency at module import time
+    try:
+        from ultralytics import YOLO
+    except Exception as e:
+        raise RuntimeError(
+            "ultralytics is required to run tracking. Install ultralytics or mock run_tracking in tests."
+        ) from e
+
     model = YOLO(model_path)
     
+    # Force CPU usage for Render free tier
     results = model.track(
         source=video_path,
         tracker="bytetrack.yaml",
         conf=conf,
         save=False,
-        stream=False
+        stream=False,
+        device="cpu"  # Explicitly use CPU
     )
     
     detections = []

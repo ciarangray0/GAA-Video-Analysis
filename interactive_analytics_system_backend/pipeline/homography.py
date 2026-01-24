@@ -5,7 +5,7 @@ import cv2
 
 from pipeline.config import PITCH_W, PITCH_H, OUT_W, OUT_H, K1
 from pipeline.schemas import PitchPoint
-from gaa_pitch_config import GAA_PITCH_VERTICES
+from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
 
 
 def compute_homography(

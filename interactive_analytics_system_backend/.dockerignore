@@ -1,0 +1,47 @@
+# Files to exclude from Docker build context
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Testing
+.pytest_cache/
+tests/
+.coverage
+htmlcov/
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in container)
+*.md
+!README.md
+
+# Development files
+.env
+.env.local
+requirements-dev.txt
+
+# Data directories (mount as volumes instead)
+data/
+
+# Streamlit (separate deployment)
+streamlit_app.py
+
+# Static frontend (served separately)
+static/
+
