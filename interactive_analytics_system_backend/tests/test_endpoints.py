@@ -114,3 +114,70 @@ def test_process_video_full_pipeline(client, monkeypatch, sample_annotations, sa
     body = resp.json()
     assert body["status"] == "completed"
     assert "player_positions" in body
+
+
+def test_get_frame_video_not_found(client):
+    """Test frame extraction returns 404 for non-existent video."""
+    response = client.get("/videos/nonexistent-id/frame/0")
+    assert response.status_code == 404
+
+
+def test_get_frame_invalid_frame_index(client, sample_video_metadata, monkeypatch):
+    """Test frame extraction returns 400 for invalid frame index."""
+    # Mock extract_frame to avoid needing real video
+    monkeypatch.setattr("app.extract_frame", lambda path, idx: b"fake jpeg data")
+
+    # Upload a fake video
+    fake_file = BytesIO(b"fake mp4 data")
+    response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
+    video_id = response.json()["video_id"]
+
+    # Request frame beyond video length
+    resp = client.get(f"/videos/{video_id}/frame/100")
+    assert resp.status_code == 400
+
+
+def test_get_frame_success(client, sample_video_metadata, monkeypatch):
+    """Test successful frame extraction."""
+    fake_jpeg = b"\xff\xd8\xff\xe0fake jpeg data"
+    monkeypatch.setattr("app.extract_frame", lambda path, idx: fake_jpeg)
+
+    # Upload a fake video
+    fake_file = BytesIO(b"fake mp4 data")
+    response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
+    video_id = response.json()["video_id"]
+
+    # Request valid frame
+    resp = client.get(f"/videos/{video_id}/frame/0")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+
+
+def test_track_video_not_found(client):
+    """Test tracking returns 404 for non-existent video."""
+    response = client.post("/videos/nonexistent-id/track")
+    assert response.status_code == 404
+
+
+def test_process_video_with_trim_params(client, monkeypatch, sample_annotations, sample_homography, sample_detections, sample_positions, sample_video_metadata):
+    """Test process-video with start_frame and end_frame parameters."""
+    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
+    monkeypatch.setattr("pipeline.homography.compute_homographies_from_annotations", lambda ann: sample_homography)
+    monkeypatch.setattr("pipeline.map_players.map_players_to_pitch", lambda dets, homogs: sample_positions)
+    monkeypatch.setattr("pipeline.trajectories.interpolate_trajectories", lambda pos, s, e: [])
+
+    annotations_json = json.dumps([a.model_dump() for a in sample_annotations])
+    fake_file = BytesIO(b"fake mp4 data")
+    resp = client.post(
+        "/process-video",
+        data={
+            "annotations_json": annotations_json,
+            "start_frame": "0",
+            "end_frame": "5"
+        },
+        files={"file": ("v.mp4", fake_file, "video/mp4")}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+

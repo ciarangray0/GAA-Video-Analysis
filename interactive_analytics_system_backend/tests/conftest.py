@@ -119,8 +119,61 @@ def sample_positions(sample_detections, sample_homography):
 @pytest.fixture
 def sample_video_metadata(monkeypatch):
     def fake_metadata(path):
-        return {"fps": 25, "num_frames": 10}
+        return {
+            "fps": 25,
+            "num_frames": 10,
+            "width": 1920,
+            "height": 1080,
+            "duration_seconds": 0.4
+        }
     # Patch both pipeline.video.get_video_metadata and the name imported into app
     monkeypatch.setattr("pipeline.video.get_video_metadata", fake_metadata)
     monkeypatch.setattr("app.get_video_metadata", fake_metadata)
     return fake_metadata
+
+
+@pytest.fixture
+def mock_gpu_tracking(monkeypatch, sample_detections):
+    """Mock GPU tracking to return sample detections."""
+    # Patch run_tracking in detect module to return sample detections
+    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
+    return sample_detections
+
+
+@pytest.fixture(autouse=True)
+def reset_gpu_client():
+    """Reset GPU client singleton between tests."""
+    import gpu_inference
+    gpu_inference._gpu_client = None
+    yield
+    gpu_inference._gpu_client = None
+
+
+@pytest.fixture
+def mock_modal_response():
+    """Sample Modal API response."""
+    return {
+        "status": "success",
+        "detections": [
+            {
+                "frame_idx": 0,
+                "track_id": 1,
+                "x1": 100.0,
+                "y1": 100.0,
+                "x2": 150.0,
+                "y2": 200.0,
+                "confidence": 0.9
+            },
+            {
+                "frame_idx": 2,
+                "track_id": 1,
+                "x1": 105.0,
+                "y1": 98.0,
+                "x2": 155.0,
+                "y2": 198.0,
+                "confidence": 0.88
+            }
+        ],
+        "count": 2
+    }
+

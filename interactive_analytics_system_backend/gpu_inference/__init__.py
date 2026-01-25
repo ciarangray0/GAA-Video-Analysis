@@ -224,6 +224,10 @@ def get_gpu_client() -> GPUInferenceClient:
         endpoint_url = os.getenv("GPU_ENDPOINT_URL")
         api_key = os.getenv("GPU_API_KEY")
 
+        # Sanitize endpoint URL - strip whitespace and newlines
+        if endpoint_url:
+            endpoint_url = endpoint_url.strip().replace('\n', '').replace('\r', '')
+
         if provider == "local":
             raise ValueError(
                 "GPU_PROVIDER is 'local'. Use run_tracking() from detect.py instead."
