@@ -3,18 +3,11 @@ numpy>=1.24.0
 pandas>=2.0.0
 opencv-python-headless>=4.8.0  # Headless for server deployment
 
-# YOLO + ByteTrack
-ultralytics>=8.0.0
-
-# PyTorch CPU-only builds (avoids downloading ~2GB of NVIDIA CUDA packages)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-torchvision>=0.15.0
-
 # API backend
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6  # Required for file uploads
+httpx>=0.25.0  # For calling remote GPU inference
 
 # Data & serialization
 pydantic>=2.0.0
@@ -22,3 +15,11 @@ pydantic>=2.0.0
 # Video handling
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.9
+
+# Optional: Only needed if using local CPU fallback for YOLO tracking
+# Uncomment these if you want local fallback (adds ~500MB to deploy)
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0.0
+# torchvision>=0.15.0
+# ultralytics>=8.0.0
+

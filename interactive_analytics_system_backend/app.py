@@ -252,16 +252,16 @@ async def track_video(video_id: str):
     # Check cache first
     detections = load_detections(video_id)
     if detections is None:
-        # Run tracking
+        # Run tracking (uses GPU or local based on GPU_PROVIDER env var)
         try:
-            from pipeline.detect import run_tracking  # Import here to avoid top-level ML imports
+            from pipeline.detect import run_tracking
             logger.info(f"Running tracking on video {video_id}")
             detections = run_tracking(video_path)
             detections_cache[video_id] = detections
             save_detections(video_id, detections)
         except Exception as e:
             logger.error(f"Tracking failed for video {video_id}: {e}")
-            raise HTTPException(status_code=500, detail="Tracking failed. Please try again.")
+            raise HTTPException(status_code=500, detail=f"Tracking failed: {str(e)}")
     else:
         detections_cache[video_id] = detections
     

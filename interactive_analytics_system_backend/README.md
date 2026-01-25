@@ -5,14 +5,46 @@ Production-ready FastAPI backend for GAA video analysis with player tracking and
 ## Features
 
 - **Video Upload & Processing** - Upload MP4 videos and extract metadata
-- **Player Detection** - YOLOv8 + ByteTrack for player tracking
+- **Player Detection** - YOLOv8 + ByteTrack for player tracking (runs on Modal GPU)
 - **Pitch Calibration** - Homography-based coordinate mapping
 - **Trajectory Interpolation** - Linear interpolation between anchor frames
 - **RESTful API** - Clean JSON API with OpenAPI documentation
 
+## Architecture
+
+```
+┌─────────────────────┐      ┌─────────────────────┐
+│   Render Backend    │      │   Modal GPU         │
+│   (FastAPI)         │      │   (T4 GPU)          │
+│                     │      │                     │
+│  1. Upload video    │      │                     │
+│  2. Call GPU API ───────>  │  3. Run YOLO        │
+│                     │  <───── 4. Return detections│
+│  5. Compute homography     │                     │
+│  6. Map players     │      │                     │
+│  7. Return results  │      │                     │
+└─────────────────────┘      └─────────────────────┘
+```
+
 ## Quick Start
 
-### Local Development
+### 1. Deploy Modal GPU Service (Required)
+
+```bash
+# Install Modal CLI
+pip install modal
+
+# Authenticate
+modal token new
+
+# Deploy YOLO service
+cd interactive_analytics_system_backend
+modal deploy gpu_inference/modal_yolo.py
+```
+
+Copy the endpoint URL printed after deployment.
+
+### 2. Local Development
 
 ```bash
 # Clone and navigate to backend
@@ -24,31 +56,54 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-pip install -r requirements-dev.txt  # For testing
+
+# Set environment variables
+export GPU_PROVIDER=modal
+export GPU_ENDPOINT_URL=https://your-modal-endpoint.modal.run
 
 # Run server
 uvicorn app:app --reload --port 8000
 ```
 
-### Docker
-
-```bash
-# Build image
-docker build -t gaa-video-api .
-
-# Run container
-docker run -p 8000:8000 \
-  -e ALLOWED_ORIGINS=https://your-frontend.com \
-  -v $(pwd)/data:/app/data \
-  gaa-video-api
-```
-
-### Deploy to Render
+### 3. Deploy to Render
 
 1. Connect your GitHub repository to Render
 2. Create a new Web Service pointing to `interactive_analytics_system_backend/`
 3. Render will auto-detect `render.yaml` configuration
-4. Set `ALLOWED_ORIGINS` in the Render dashboard to your frontend URL
+4. Set these environment variables in Render dashboard:
+   - `ALLOWED_ORIGINS` - Your frontend URL
+   - `GPU_PROVIDER` - `modal`
+   - `GPU_ENDPOINT_URL` - Your Modal endpoint URL
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GPU_PROVIDER` | GPU inference provider (`modal`, `runpod`, `local`) | `local` |
+| `GPU_ENDPOINT_URL` | URL of the GPU inference endpoint | - |
+| `GPU_API_KEY` | API key for GPU provider (RunPod only) | - |
+| `ALLOWED_ORIGINS` | CORS allowed origins | `*` |
+| `MAX_VIDEO_SIZE_MB` | Maximum video upload size | `500` |
+
+## Project Structure
+
+```
+interactive_analytics_system_backend/
+├── app.py                 # FastAPI application
+├── gpu_inference/         # GPU inference client
+│   ├── __init__.py        # GPUInferenceClient class
+│   ├── modal_yolo.py      # Modal GPU service (deploy this)
+│   └── README.md          # GPU setup instructions
+├── pipeline/              # Processing pipeline
+│   ├── detect.py          # YOLO tracking (delegates to GPU)
+│   ├── homography.py      # Homography computation
+│   ├── map_players.py     # Player position mapping
+│   ├── trajectories.py    # Trajectory interpolation
+│   ├── schemas.py         # Pydantic models
+│   └── video.py           # Video utilities
+├── requirements.txt       # Production dependencies
+└── render.yaml            # Render deployment config
+```
 
 ## API Endpoints
 
