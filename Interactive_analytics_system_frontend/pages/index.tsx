@@ -81,6 +81,9 @@ export default function Home() {
   const [processedEndFrame, setProcessedEndFrame] = useState(0)
   const [homographyFrameIndices, setHomographyFrameIndices] = useState<number[]>([])
   const [processedFps, setProcessedFps] = useState(25)
+  const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null)
+  const [warpedFrameUrl, setWarpedFrameUrl] = useState<string | null>(null)
+  const [loadingWarpedFrame, setLoadingWarpedFrame] = useState(false)
 
   // Refs
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -753,6 +756,22 @@ export default function Home() {
     // Filter positions for current frame
     const framePositions = positions.filter(p => p.frame_idx === frame)
 
+    // Debug: log out-of-bounds positions
+    const outOfBounds = framePositions.filter(p =>
+      p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W ||
+      p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H
+    )
+    if (outOfBounds.length > 0) {
+      console.warn(`Frame ${frame}: ${outOfBounds.length} out-of-bounds positions:`, outOfBounds)
+    }
+
+    // Generate consistent color for each track_id
+    const getPlayerColor = (trackId: number): string => {
+      // Use golden ratio to spread colors evenly
+      const hue = (trackId * 137.508) % 360
+      return `hsl(${hue}, 70%, 50%)`
+    }
+
     // Draw player positions
     // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1450 for y)
     // Scale to display canvas: x_display = (x_pitch / PITCH_CANVAS_W) * DISPLAY_WIDTH
@@ -760,22 +779,26 @@ export default function Home() {
       const x = (pos.x_pitch / PITCH_CANVAS_W) * RESULTS_PITCH_WIDTH
       const y = (pos.y_pitch / PITCH_CANVAS_H) * RESULTS_PITCH_HEIGHT
 
+      // Check if position is out of bounds (debugging)
+      const isOutOfBounds = pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W ||
+                           pos.y_pitch < 0 || pos.y_pitch > PITCH_CANVAS_H
+
       // Clamp to canvas bounds with padding
       const padding = 8
       const clampedX = Math.max(padding, Math.min(RESULTS_PITCH_WIDTH - padding, x))
       const clampedY = Math.max(padding, Math.min(RESULTS_PITCH_HEIGHT - padding, y))
 
-      // Use track_id for consistent coloring (even = red team, odd = blue team)
-      const isEvenTeam = pos.track_id % 2 === 0
-      ctx.fillStyle = isEvenTeam ? '#ff3333' : '#3366ff'
+      // Use unique color per track_id (red border if out of bounds)
+      ctx.fillStyle = getPlayerColor(pos.track_id)
 
       // Draw player as filled circle with border
       ctx.beginPath()
       ctx.arc(clampedX, clampedY, 8, 0, 2 * Math.PI)
       ctx.fill()
 
-      ctx.strokeStyle = '#ffffff'
-      ctx.lineWidth = 2
+      // Red border for out-of-bounds positions, white otherwise
+      ctx.strokeStyle = isOutOfBounds ? '#ff0000' : '#ffffff'
+      ctx.lineWidth = isOutOfBounds ? 3 : 2
       ctx.stroke()
 
       // Draw track ID label
@@ -938,6 +961,61 @@ export default function Home() {
       }
     }
   }, [])
+
+  // Create and cleanup video object URL
+  useEffect(() => {
+    if (videoFile) {
+      const url = URL.createObjectURL(videoFile)
+      setVideoObjectUrl(url)
+      return () => {
+        URL.revokeObjectURL(url)
+      }
+    } else {
+      setVideoObjectUrl(null)
+    }
+  }, [videoFile])
+
+  // Load warped frame for homography visualization
+  const loadWarpedFrame = useCallback(async (frameIdx: number) => {
+    if (!videoMetadata) return
+
+    setLoadingWarpedFrame(true)
+    try {
+      const url = `${API_URL}/videos/${videoMetadata.video_id}/warped-frame/${frameIdx}`
+      // Test if the endpoint exists first
+      const response = await fetch(url)
+      if (response.ok) {
+        const blob = await response.blob()
+        const objectUrl = URL.createObjectURL(blob)
+        setWarpedFrameUrl(objectUrl)
+      } else {
+        setWarpedFrameUrl(null)
+      }
+    } catch (err) {
+      console.error('Failed to load warped frame:', err)
+      setWarpedFrameUrl(null)
+    } finally {
+      setLoadingWarpedFrame(false)
+    }
+  }, [videoMetadata])
+
+  // Load warped frame when selected homography frame changes
+  useEffect(() => {
+    if (selectedHomographyFrame !== null) {
+      loadWarpedFrame(selectedHomographyFrame)
+    } else {
+      setWarpedFrameUrl(null)
+    }
+  }, [selectedHomographyFrame, loadWarpedFrame])
+
+  // Cleanup warped frame URL when it changes to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (warpedFrameUrl) {
+        URL.revokeObjectURL(warpedFrameUrl)
+      }
+    }
+  }, [warpedFrameUrl])
 
   // Get anchor frames that were used for homography (non-skipped with 4+ points)
   // Use homographyFrameIndices from backend if available, otherwise fall back to local anchorFrames
@@ -1390,16 +1468,37 @@ export default function Home() {
                   {selectedHomographyFrame !== null && (
                     <div className="homography-detail">
                       <h4>Frame {selectedHomographyFrame} Annotations</h4>
+
+                      {/* Warped frame visualization */}
+                      <div className="warped-frame-section">
+                        <h5>Warped Frame Preview</h5>
+                        {loadingWarpedFrame && <p className="loading-text">Loading warped frame...</p>}
+                        {warpedFrameUrl && !loadingWarpedFrame && (
+                          <img
+                            src={warpedFrameUrl}
+                            alt={`Warped frame ${selectedHomographyFrame}`}
+                            className="warped-frame-img"
+                          />
+                        )}
+                        {!warpedFrameUrl && !loadingWarpedFrame && (
+                          <p className="no-warped-frame">
+                            Warped frame preview not available.
+                            This shows how the video frame maps to the pitch canvas.
+                          </p>
+                        )}
+                      </div>
+
                       {(() => {
                         const anchorData = anchorFrames.find(af => af.frame_idx === selectedHomographyFrame)
                         if (anchorData && anchorData.points.length > 0) {
                           return (
                             <div className="point-mapping-list">
+                              <h5>Keypoint Correspondences</h5>
                               {anchorData.points.map((point, idx) => (
                                 <div key={idx} className="point-mapping">
                                   <span className="pitch-label">{getPointLabel(point.pitch_id)}</span>
                                   <span className="arrow">→</span>
-                                  <span className="coords">({point.x_img}, {point.y_img})</span>
+                                  <span className="coords">({Math.round(point.x_img)}, {Math.round(point.y_img)})</span>
                                 </div>
                               ))}
                             </div>
@@ -1407,15 +1506,14 @@ export default function Home() {
                         } else {
                           return (
                             <p className="no-annotation-data">
-                              Annotation data for this frame is not available locally.
-                              The homography was computed on the server.
+                              Keypoint data for this frame is available on the server.
                             </p>
                           )
                         }
                       })()}
                       <p className="homography-note">
-                        These pixel-to-pitch mappings define the perspective transform
-                        used to project player positions onto the 2D pitch view.
+                        The warped frame shows the perspective transform applied.
+                        Player positions are mapped using this homography.
                       </p>
                     </div>
                   )}
@@ -1426,13 +1524,14 @@ export default function Home() {
               <div className={`results-main ${showHomographySidebar ? 'with-sidebar' : ''}`}>
                 {/* Video frame view */}
                 <div className="video-frame-panel">
-                  <h4>Video Frame</h4>
-                  {videoFile && (
+                  <h4>Video Frame {currentFrame}</h4>
+                  {videoObjectUrl && (
                     <video
                       ref={videoPlayerRef}
-                      src={URL.createObjectURL(videoFile)}
+                      src={videoObjectUrl}
                       className="results-video"
                       muted
+                      playsInline
                       onTimeUpdate={() => {
                         if (isSyncMode && videoPlayerRef.current && videoMetadata && !isPlaying) {
                           const frameFromVideo = Math.round(videoPlayerRef.current.currentTime * videoMetadata.fps)
@@ -1443,11 +1542,10 @@ export default function Home() {
                       }}
                     />
                   )}
-                  {!videoFile && (
-                    <canvas
-                      ref={resultsFrameCanvasRef}
-                      className="results-frame-canvas"
-                    />
+                  {!videoObjectUrl && (
+                    <div className="video-placeholder">
+                      <p>Video not available</p>
+                    </div>
                   )}
                 </div>
 
@@ -1461,8 +1559,7 @@ export default function Home() {
                     className="pitch-canvas"
                   />
                   <div className="pitch-legend">
-                    <span>🔴 Players (even IDs)</span>
-                    <span>🔵 Players (odd IDs)</span>
+                    <span>● Each player has a unique color based on their track ID</span>
                   </div>
                 </div>
               </div>
@@ -1484,6 +1581,68 @@ export default function Home() {
                 {playerPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
                   <span className="no-players">No players detected in this frame</span>
                 )}
+              </div>
+            </div>
+
+            {/* Debug: Detailed coordinate table */}
+            <div className="debug-coordinates-panel">
+              <h4>🔍 Debug: Player Coordinates (Frame {currentFrame})</h4>
+              <p className="debug-info">
+                Expected ranges: x_pitch: 0-{PITCH_CANVAS_W}, y_pitch: 0-{PITCH_CANVAS_H} →
+                Display: 0-{PITCH_DISPLAY_WIDTH} × 0-{PITCH_DISPLAY_HEIGHT}
+              </p>
+              <div className="debug-table-container">
+                <table className="debug-table">
+                  <thead>
+                    <tr>
+                      <th>Track ID</th>
+                      <th>x_pitch</th>
+                      <th>y_pitch</th>
+                      <th>x_display</th>
+                      <th>y_display</th>
+                      <th>Source</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {playerPositions
+                      .filter(p => p.frame_idx === currentFrame)
+                      .sort((a, b) => a.track_id - b.track_id)
+                      .map((pos, idx) => {
+                        const xDisplay = (pos.x_pitch / PITCH_CANVAS_W) * PITCH_DISPLAY_WIDTH
+                        const yDisplay = (pos.y_pitch / PITCH_CANVAS_H) * PITCH_DISPLAY_HEIGHT
+                        const isOutOfBounds =
+                          pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W ||
+                          pos.y_pitch < 0 || pos.y_pitch > PITCH_CANVAS_H
+                        return (
+                          <tr key={idx} className={isOutOfBounds ? 'out-of-bounds' : ''}>
+                            <td><strong>#{pos.track_id}</strong></td>
+                            <td className={pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W ? 'bad-value' : ''}>
+                              {pos.x_pitch.toFixed(2)}
+                            </td>
+                            <td className={pos.y_pitch < 0 || pos.y_pitch > PITCH_CANVAS_H ? 'bad-value' : ''}>
+                              {pos.y_pitch.toFixed(2)}
+                            </td>
+                            <td>{xDisplay.toFixed(1)}</td>
+                            <td>{yDisplay.toFixed(1)}</td>
+                            <td>{pos.source}</td>
+                            <td>{isOutOfBounds ? '❌ OUT' : '✅ OK'}</td>
+                          </tr>
+                        )
+                      })
+                    }
+                  </tbody>
+                </table>
+                {playerPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
+                  <p className="no-data">No player positions for this frame</p>
+                )}
+              </div>
+              <div className="debug-summary">
+                <span>Total players: {playerPositions.filter(p => p.frame_idx === currentFrame).length}</span>
+                <span>Out of bounds: {playerPositions.filter(p =>
+                  p.frame_idx === currentFrame &&
+                  (p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H)
+                ).length}</span>
               </div>
             </div>
           </div>

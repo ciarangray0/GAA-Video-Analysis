@@ -237,6 +237,120 @@ async def get_frame(video_id: str, frame_idx: int):
         raise HTTPException(status_code=500, detail="Failed to extract frame")
 
 
+@app.get("/videos/{video_id}/warped-frame/{frame_idx}")
+async def get_warped_frame(video_id: str, frame_idx: int):
+    """
+    Extract a frame and warp it using the computed homography.
+
+    This visualizes how the frame maps to the pitch canvas,
+    matching the notebook's distorted_homography_warp function.
+
+    Args:
+        video_id: Video identifier
+        frame_idx: Frame index (must be an anchor frame with homography)
+
+    Returns:
+        JPEG image of the warped frame on pitch canvas
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_info = videos[video_id]
+
+    # Check if we have a homography for this frame
+    if video_id not in homographies_cache:
+        raise HTTPException(status_code=400, detail="No homographies computed for this video")
+
+    homographies = homographies_cache[video_id]
+    if frame_idx not in homographies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No homography for frame {frame_idx}. Available: {list(homographies.keys())}"
+        )
+
+    H = homographies[frame_idx]
+
+    try:
+        # Import required modules
+        import cv2
+        import numpy as np
+        from pipeline.config import OUT_W, OUT_H, K1
+
+        # Extract the original frame
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        # Warp the frame using the distorted homography (matches notebook)
+        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+
+        # Encode as JPEG
+        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        return Response(
+            content=buffer.tobytes(),
+            media_type="image/jpeg",
+            headers={"Cache-Control": "max-age=3600"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create warped frame {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
+
+
+def distorted_homography_warp(img, H, out_w, out_h, k1):
+    """
+    Warp an image using homography with radial distortion.
+
+    This matches the notebook's distorted_homography_warp function exactly.
+    Uses vectorized operations for performance.
+    """
+    import cv2
+    import numpy as np
+
+    h, w = img.shape[:2]
+    H_inv = np.linalg.inv(H)
+
+    cx, cy = out_w / 2, out_h / 2
+
+    # Create coordinate grids
+    xs, ys = np.meshgrid(np.arange(out_w), np.arange(out_h))
+
+    # Apply radial distortion
+    dx = xs - cx
+    dy = ys - cy
+    r2 = dx**2 + dy**2
+
+    xs_d = xs + dx * k1 * r2
+    ys_d = ys + dy * k1 * r2
+
+    # Create homogeneous coordinates
+    ones = np.ones_like(xs_d)
+    pts_d = np.stack([xs_d, ys_d, ones], axis=-1)
+
+    # Transform back to source image coordinates
+    # Reshape for matrix multiplication
+    pts_flat = pts_d.reshape(-1, 3)
+    src_flat = (H_inv @ pts_flat.T).T
+    src_flat = src_flat[:, :2] / src_flat[:, 2:3]
+
+    # Reshape to grid
+    map_x = src_flat[:, 0].reshape(out_h, out_w).astype(np.float32)
+    map_y = src_flat[:, 1].reshape(out_h, out_w).astype(np.float32)
+
+    # Remap
+    warped = cv2.remap(img, map_x, map_y,
+                       interpolation=cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_CONSTANT)
+
+    return warped
+
+
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
 async def track_video(video_id: str):
     """
