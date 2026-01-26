@@ -1214,7 +1214,7 @@ export default function Home() {
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <div className="container">
-        <h1>⚽ GAA Video Analysis System</h1>
+        <h1>GAA Video Analysis System</h1>
 
         {/* Step 1: Upload Video */}
         <div className="upload-section">
