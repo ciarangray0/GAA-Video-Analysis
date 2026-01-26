@@ -26,7 +26,7 @@ import numpy as np
 import cv2
 
 from pipeline.config import OUT_W, OUT_H, K1
-from pipeline.schemas import PitchPoint
+from pipeline.schemas import PitchPoint, LineAnnotation
 from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
 
 # Pitch canvas dimensions (pixels) - the canonical coordinate space
@@ -180,6 +180,103 @@ def compute_homographies_from_annotations(
             continue
     
     return homographies
+
+
+def compute_homographies_with_lines(
+    annotations: Dict[int, Dict],
+    num_samples_per_line: int = 10,
+    max_iterations: int = 3,
+    keypoint_weight: int = 3
+) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+    """
+    Compute homography matrices with support for line constraints.
+
+    This is the enhanced version of compute_homographies_from_annotations
+    that supports both keypoint and line annotations. Line annotations
+    provide additional constraints for regions where point intersections
+    are not visible (e.g., midfield).
+
+    Args:
+        annotations: Dict mapping frame_idx to annotation dict:
+            {
+                "keypoints": List[PitchPoint],
+                "lines": List[LineAnnotation]  # Optional
+            }
+        num_samples_per_line: Points to sample per line constraint
+        max_iterations: Refinement iterations for line constraints
+        keypoint_weight: Weight multiplier for keypoints vs line points
+
+    Returns:
+        Tuple of:
+        - homographies: Dict mapping frame_idx to 3x3 homography matrix
+        - info: Dict mapping frame_idx to computation info dict with:
+            - iterations: Number of iterations performed
+            - valid_lines: Number of valid line annotations used
+            - line_warnings: List of warning messages
+            - synthetic_points: Total synthetic points generated
+            - converged: Whether algorithm converged
+    """
+    from pipeline.line_constraints import compute_line_constrained_homography
+    from pipeline.schemas import PitchPoint, LineAnnotation
+
+    homographies = {}
+    computation_info = {}
+
+    for frame_idx, ann in annotations.items():
+        # Handle both old format (list of PitchPoint) and new format (dict)
+        if isinstance(ann, list):
+            # Old format: list of PitchPoint objects
+            keypoints = ann
+            lines = []
+        else:
+            # New format: dict with keypoints and lines
+            keypoints = ann.get("keypoints", [])
+            lines = ann.get("lines", [])
+
+        if len(keypoints) < 4:
+            continue
+
+        # Extract keypoint correspondences
+        pts_image = np.array([
+            [p.x_img, p.y_img] for p in keypoints
+        ], dtype=np.float32)
+
+        pts_canvas = np.array([
+            _meters_to_canvas_pixels(*GAA_PITCH_VERTICES[p.pitch_id])
+            for p in keypoints
+        ], dtype=np.float32)
+
+        # Convert line annotations to dict format for line_constraints module
+        line_dicts = []
+        for line in lines:
+            if isinstance(line, LineAnnotation):
+                line_dicts.append({
+                    "line_id": line.line_id,
+                    "u1": line.u1, "v1": line.v1,
+                    "u2": line.u2, "v2": line.v2
+                })
+            elif isinstance(line, dict):
+                line_dicts.append(line)
+
+        try:
+            H, info = compute_line_constrained_homography(
+                pts_image, pts_canvas,
+                line_dicts,
+                num_samples_per_line=num_samples_per_line,
+                max_iterations=max_iterations,
+                keypoint_weight=keypoint_weight
+            )
+            homographies[frame_idx] = H
+            computation_info[frame_idx] = info
+        except ValueError as e:
+            computation_info[frame_idx] = {
+                'error': str(e),
+                'valid_lines': 0,
+                'iterations': 0
+            }
+            continue
+
+    return homographies, computation_info
 
 
 # =============================================================================

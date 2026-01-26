@@ -19,11 +19,13 @@ from pipeline.schemas import (
     InterpolationResponse,
     Detection,
     PlayerPitchPosition,
-    ProcessVideoResponse
+    ProcessVideoResponse,
+    LineAnnotation,
+    AnchorFrameAnnotation
 )
 # NOTE: `run_tracking` performs heavy ML imports; import lazily inside endpoints to keep module import lightweight.
 # from pipeline.detect import run_tracking
-from pipeline.homography import compute_homographies_from_annotations
+from pipeline.homography import compute_homographies_from_annotations, compute_homographies_with_lines
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
@@ -430,6 +432,129 @@ async def compute_homographies(
     logger.info(f"Computed {len(homographies)} homographies for video {video_id}")
 
     return HomographyResponse(frames=sorted(homographies.keys()))
+
+
+# Import BaseModel for the response class (already imported via pydantic in schemas)
+from pydantic import BaseModel
+
+
+class HomographyWithLinesResponse(BaseModel):
+    """Response for line-constrained homography computation."""
+    frames: List[int]
+    info: Dict[str, dict] = {}  # Frame index (as string) -> computation info
+
+
+@app.post("/videos/{video_id}/homographies/v2")
+async def compute_homographies_with_line_constraints(
+    video_id: str,
+    annotations: List[AnchorFrameAnnotation],
+    num_samples_per_line: int = Query(10, ge=2, le=50, description="Points to sample per line"),
+    max_iterations: int = Query(3, ge=1, le=10, description="Maximum refinement iterations"),
+    keypoint_weight: int = Query(3, ge=1, le=10, description="Weight multiplier for keypoints vs line points")
+):
+    """
+    Compute homography matrices with line constraint support.
+
+    This enhanced endpoint accepts both keypoint and line annotations.
+    Line annotations provide additional constraints for regions where
+    point intersections are not visible (e.g., midfield).
+
+    **Line Annotation Usage:**
+    - Click two points on a known horizontal pitch line (13m, 20m, 45m, 65m, halfway)
+    - The system uses the known Y-value of the line to generate synthetic correspondences
+    - This improves homography stability in midfield regions
+
+    **Available line IDs:**
+    - Top half: "13m_top", "20m_top", "45m_top", "65m_top"
+    - Middle: "halfway"
+    - Bottom half: "65m_bottom", "45m_bottom", "20m_bottom", "13m_bottom"
+
+    **Algorithm:**
+    1. Compute initial homography from keypoints only
+    2. For each line, sample points and project through homography
+    3. Create synthetic correspondences with known Y, estimated X
+    4. Re-compute homography with all points (iteratively)
+
+    Args:
+        video_id: Video identifier
+        annotations: List of AnchorFrameAnnotation objects with keypoints and lines
+        num_samples_per_line: Number of points to sample along each line (default: 10)
+        max_iterations: Maximum refinement iterations (default: 3)
+        keypoint_weight: How many times more important keypoints are than line points (default: 3)
+
+    Returns:
+        frames: List of frame indices with computed homographies
+        info: Computation info per frame (iterations, valid_lines, warnings, etc.)
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Convert annotations to dict format
+    annotations_dict = {}
+    for ann in annotations:
+        annotations_dict[ann.frame_idx] = {
+            "keypoints": ann.points,
+            "lines": ann.lines
+        }
+
+    # Compute with line constraints
+    try:
+        homographies, computation_info = compute_homographies_with_lines(
+            annotations_dict,
+            num_samples_per_line=num_samples_per_line,
+            max_iterations=max_iterations,
+            keypoint_weight=keypoint_weight
+        )
+        homographies_cache[video_id] = homographies
+        save_homographies(video_id, homographies)
+    except Exception as e:
+        logger.error(f"Line-constrained homography computation failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Homography computation failed: {str(e)}")
+
+    if not homographies:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid homographies computed. Need at least 4 keypoints per frame."
+        )
+
+    # Log summary
+    total_lines_used = sum(info.get('valid_lines', 0) for info in computation_info.values())
+    logger.info(
+        f"Computed {len(homographies)} homographies for video {video_id} "
+        f"using {total_lines_used} line constraints total"
+    )
+
+    # Convert info keys to strings for JSON serialization
+    info_serialized = {str(k): v for k, v in computation_info.items()}
+
+    return {
+        "frames": sorted(homographies.keys()),
+        "info": info_serialized
+    }
+
+
+@app.get("/line-constraints/available-lines")
+async def get_available_line_ids():
+    """
+    Get list of available line IDs for line annotations.
+
+    Returns dict mapping line_id to Y value in meters.
+    """
+    from pipeline.line_constraints import GAA_PITCH_LINES
+    return {
+        "lines": GAA_PITCH_LINES,
+        "description": {
+            "13m_top": "13 meter line (top/near goal)",
+            "20m_top": "20 meter line (top)",
+            "45m_top": "45 meter line (top)",
+            "65m_top": "65 meter line (top)",
+            "halfway": "Halfway line (70m)",
+            "65m_bottom": "65 meter line (bottom)",
+            "45m_bottom": "45 meter line (bottom)",
+            "20m_bottom": "20 meter line (bottom)",
+            "13m_bottom": "13 meter line (bottom/far goal)",
+        }
+    }
 
 
 @app.post("/videos/{video_id}/map_players", response_model=List[PlayerPitchPosition])

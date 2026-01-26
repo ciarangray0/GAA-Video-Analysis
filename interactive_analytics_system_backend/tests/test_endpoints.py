@@ -43,6 +43,58 @@ def test_homographies_endpoint(client, sample_video_metadata, sample_annotations
     assert 0 in frames
 
 
+def test_homographies_v2_with_lines(client, sample_video_metadata, sample_anchor_frame_annotations):
+    """Test the v2 homography endpoint with line constraints."""
+    fake_file = BytesIO(b"fake mp4 data")
+    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
+    assert r.status_code == 200
+    vid = r.json()["video_id"]
+
+    # Use model_dump() for Pydantic v2 compatibility, fallback to dict() for v1
+    payload = []
+    for a in sample_anchor_frame_annotations:
+        if hasattr(a, 'model_dump'):
+            payload.append(a.model_dump())
+        else:
+            payload.append(a.dict())
+
+    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
+    assert resp.status_code == 200
+    result = resp.json()
+    assert "frames" in result
+    assert 0 in result["frames"]
+    assert "info" in result
+
+
+def test_homographies_v2_without_lines(client, sample_video_metadata, sample_anchor_frame_annotations_no_lines):
+    """Test the v2 endpoint works without line constraints (backwards compatible)."""
+    fake_file = BytesIO(b"fake mp4 data")
+    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
+    vid = r.json()["video_id"]
+
+    payload = []
+    for a in sample_anchor_frame_annotations_no_lines:
+        if hasattr(a, 'model_dump'):
+            payload.append(a.model_dump())
+        else:
+            payload.append(a.dict())
+
+    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
+    assert resp.status_code == 200
+    result = resp.json()
+    assert 0 in result["frames"]
+
+
+def test_get_available_lines(client):
+    """Test the endpoint that returns available line IDs."""
+    resp = client.get("/line-constraints/available-lines")
+    assert resp.status_code == 200
+    result = resp.json()
+    assert "lines" in result
+    assert "20m_top" in result["lines"]
+    assert "halfway" in result["lines"]
+
+
 def test_homographies_bad_annotations(client, sample_video_metadata, bad_annotations):
     fake_file = BytesIO(b"fake mp4 data")
     r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
