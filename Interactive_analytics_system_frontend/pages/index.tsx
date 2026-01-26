@@ -782,6 +782,14 @@ export default function Home() {
   }, [videoMetadata])
 
   // Playback controls
+  const stopPlayback = useCallback(() => {
+    if (playbackIntervalRef.current) {
+      clearInterval(playbackIntervalRef.current)
+      playbackIntervalRef.current = null
+    }
+    setIsPlaying(false)
+  }, [])
+
   const startPlayback = useCallback(() => {
     if (playbackIntervalRef.current) {
       clearInterval(playbackIntervalRef.current)
@@ -811,13 +819,6 @@ export default function Home() {
     }, intervalMs)
   }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
 
-  const stopPlayback = useCallback(() => {
-    if (playbackIntervalRef.current) {
-      clearInterval(playbackIntervalRef.current)
-      playbackIntervalRef.current = null
-    }
-    setIsPlaying(false)
-  }, [])
 
   const togglePlayback = useCallback(() => {
     if (isPlaying) {
