@@ -9,9 +9,23 @@ interface PitchPoint {
   y_img: number
 }
 
+interface LineAnnotation {
+  line_id: string
+  u1: number
+  v1: number
+  u2: number
+  v2: number
+}
+
 interface PitchAnnotation {
   frame_idx: number
   points: PitchPoint[]
+}
+
+interface AnchorFrameAnnotation {
+  frame_idx: number
+  points: PitchPoint[]
+  lines: LineAnnotation[]
 }
 
 interface PlayerPosition {
@@ -45,6 +59,7 @@ interface AnchorFrame {
   frame_idx: number
   isSkipped: boolean
   points: PitchPoint[]
+  lines: LineAnnotation[]
 }
 
 export default function Home() {
@@ -63,6 +78,24 @@ export default function Home() {
   const [currentAnchorIdx, setCurrentAnchorIdx] = useState(0)
   const [frameImageUrl, setFrameImageUrl] = useState<string | null>(null)
   const [loadingFrame, setLoadingFrame] = useState(false)
+
+  // Line annotation state
+  const [annotationMode, setAnnotationMode] = useState<'point' | 'line'>('point')
+  const [selectedLineId, setSelectedLineId] = useState<string>('20m_top')
+  const [pendingLinePoint1, setPendingLinePoint1] = useState<{ x: number; y: number } | null>(null)
+
+  // Available pitch lines for line annotation (matches backend GAA_PITCH_LINES)
+  const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }> = {
+    '13m_top': { label: '13m Line (Top)', y_meters: 13.0 },
+    '20m_top': { label: '20m Line (Top)', y_meters: 20.0 },
+    '45m_top': { label: '45m Line (Top)', y_meters: 45.0 },
+    '65m_top': { label: '65m Line (Top)', y_meters: 65.0 },
+    'halfway': { label: 'Halfway Line', y_meters: 70.0 },
+    '65m_bottom': { label: '65m Line (Bottom)', y_meters: 75.0 },
+    '45m_bottom': { label: '45m Line (Bottom)', y_meters: 95.0 },
+    '20m_bottom': { label: '20m Line (Bottom)', y_meters: 120.0 },
+    '13m_bottom': { label: '13m Line (Bottom)', y_meters: 127.0 },
+  }
 
   // Processing state
   const [processing, setProcessing] = useState(false)
@@ -97,18 +130,18 @@ export default function Home() {
   // Backend pitch canvas dimensions (canonical coordinate space)
   // All player positions from backend are in this pixel space
   const PITCH_CANVAS_W = 850
-  const PITCH_CANVAS_H = 1450
+  const PITCH_CANVAS_H = 1400
 
   // Display canvas dimensions - MUST maintain same aspect ratio as backend canvas
-  // Aspect ratio = 850/1450 = 0.5862
+  // Aspect ratio = 850/1400 = 0.607
   // We scale down to fit the UI while preserving exact proportions
   const DISPLAY_SCALE = 0.4  // 40% of backend canvas size
   const PITCH_DISPLAY_WIDTH = Math.round(PITCH_CANVAS_W * DISPLAY_SCALE)   // 340
-  const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 580
+  const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 560
 
-  // Actual GAA pitch dimensions in meters (145m includes goal area)
+  // Actual GAA pitch dimensions in meters
   const GAA_PITCH_WIDTH = 85.0
-  const GAA_PITCH_LENGTH = 145.0
+  const GAA_PITCH_LENGTH = 140.0
 
   // Pitch canvas ref for the diagram
   const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
@@ -127,8 +160,8 @@ export default function Home() {
     // Goal posts
     "top_goal_lp": [39.25, 0.0],
     "top_goal_rp": [45.75, 0.0],
-    "bottom_goal_lp": [39.25, 145.0],
-    "bottom_goal_rp": [45.75, 145.0],
+    "bottom_goal_lp": [39.25, 140.0],
+    "bottom_goal_rp": [45.75, 140.0],
 
     // Goalie box
     "left_box_bottom": [35.5, 135.5],
@@ -246,7 +279,8 @@ export default function Home() {
         frames.push({
           frame_idx: frameIdx,
           isSkipped: false,
-          points: []
+          points: [],
+          lines: []
         })
       }
     }
@@ -319,10 +353,75 @@ export default function Home() {
     // Draw image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-    // Draw annotation points for current anchor frame
     const currentAnchor = anchorFrames[currentAnchorIdx]
+    const imgScale = canvas.width / img.naturalWidth
+
+    // Draw line annotations for current anchor frame
+    if (currentAnchor && currentAnchor.lines) {
+      currentAnchor.lines.forEach((line) => {
+        const x1 = line.u1 * imgScale
+        const y1 = line.v1 * imgScale
+        const x2 = line.u2 * imgScale
+        const y2 = line.v2 * imgScale
+
+        // Draw dashed line
+        ctx.strokeStyle = '#00ffff'
+        ctx.lineWidth = 3
+        ctx.setLineDash([10, 5])
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        // Draw endpoints
+        ctx.fillStyle = '#00ffff'
+        ctx.beginPath()
+        ctx.arc(x1, y1, 6, 0, 2 * Math.PI)
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(x2, y2, 6, 0, 2 * Math.PI)
+        ctx.fill()
+
+        // Draw label at midpoint
+        const midX = (x1 + x2) / 2
+        const midY = (y1 + y2) / 2
+        ctx.fillStyle = '#000000'
+        ctx.fillRect(midX - 40, midY - 10, 80, 20)
+        ctx.fillStyle = '#00ffff'
+        ctx.font = 'bold 11px Arial'
+        ctx.textAlign = 'center'
+        ctx.fillText(AVAILABLE_LINES[line.line_id]?.label || line.line_id, midX, midY + 4)
+        ctx.textAlign = 'left'
+      })
+    }
+
+    // Draw pending line point (first click in line mode)
+    if (pendingLinePoint1) {
+      const x = pendingLinePoint1.x * imgScale
+      const y = pendingLinePoint1.y * imgScale
+
+      // Draw pulsing point
+      ctx.fillStyle = '#ffff00'
+      ctx.beginPath()
+      ctx.arc(x, y, 10, 0, 2 * Math.PI)
+      ctx.fill()
+      ctx.strokeStyle = '#000000'
+      ctx.lineWidth = 2
+      ctx.stroke()
+
+      // Draw instruction
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
+      ctx.fillRect(x - 80, y + 15, 160, 25)
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 12px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText('Click second point on line', x, y + 32)
+      ctx.textAlign = 'left'
+    }
+
+    // Draw annotation points for current anchor frame
     if (currentAnchor && currentAnchor.points) {
-      const imgScale = canvas.width / img.naturalWidth
       currentAnchor.points.forEach((point) => {
         const x = point.x_img * imgScale
         const y = point.y_img * imgScale
@@ -344,7 +443,7 @@ export default function Home() {
         ctx.fillText(point.pitch_id, x + 12, y + 4)
       })
     }
-  }, [anchorFrames, currentAnchorIdx])
+  }, [anchorFrames, currentAnchorIdx, pendingLinePoint1, AVAILABLE_LINES])
 
   // Handle click on frame to mark a point (first step of annotation)
   const handleFrameClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -371,8 +470,52 @@ export default function Home() {
     const x = clickX * cssToCanvasX * canvasToImageX
     const y = clickY * cssToCanvasY * canvasToImageY
 
-    // Store the pending frame click - user must now click on pitch diagram
-    setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
+    if (annotationMode === 'line') {
+      // Line annotation mode
+      if (!pendingLinePoint1) {
+        // First click - store first point
+        setPendingLinePoint1({ x: Math.round(x), y: Math.round(y) })
+      } else {
+        // Second click - create line annotation
+        const newLine: LineAnnotation = {
+          line_id: selectedLineId,
+          u1: pendingLinePoint1.x,
+          v1: pendingLinePoint1.y,
+          u2: Math.round(x),
+          v2: Math.round(y)
+        }
+
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          // Remove existing line of same type if exists
+          updated[currentAnchorIdx].lines = updated[currentAnchorIdx].lines.filter(
+            l => l.line_id !== selectedLineId
+          )
+          updated[currentAnchorIdx].lines.push(newLine)
+          return updated
+        })
+
+        // Clear pending state
+        setPendingLinePoint1(null)
+      }
+    } else {
+      // Point annotation mode - store the pending frame click, user must click on pitch diagram
+      setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
+    }
+  }
+
+  // Cancel line annotation in progress
+  const cancelLineAnnotation = () => {
+    setPendingLinePoint1(null)
+  }
+
+  // Remove line annotation
+  const removeLine = (lineIdx: number) => {
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx].lines = updated[currentAnchorIdx].lines.filter((_, i) => i !== lineIdx)
+      return updated
+    })
   }
 
   // Handle click on pitch diagram to complete annotation
@@ -602,7 +745,8 @@ export default function Home() {
       updated[currentAnchorIdx] = {
         frame_idx: newFrameIdx,
         isSkipped: false,
-        points: [] // Clear points when swapping
+        points: [], // Clear points when swapping
+        lines: []   // Clear lines when swapping
       }
       return updated
     })
@@ -618,17 +762,23 @@ export default function Home() {
     }
 
     // Get annotated anchor frames (non-skipped with at least 4 points)
-    const validAnnotations: PitchAnnotation[] = anchorFrames
+    // Use v2 format with lines included
+    const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
       .filter(af => !af.isSkipped && af.points.length >= 4)
       .map(af => ({
         frame_idx: af.frame_idx,
-        points: af.points
+        points: af.points,
+        lines: af.lines || []
       }))
 
     if (validAnnotations.length === 0) {
       setError('Please annotate at least one anchor frame with 4+ points')
       return
     }
+
+    // Log line annotations for debugging
+    const totalLines = validAnnotations.reduce((sum, a) => sum + a.lines.length, 0)
+    console.log(`Processing with ${validAnnotations.length} anchor frames and ${totalLines} line constraints`)
 
     setProcessing(true)
     setError('')
@@ -773,7 +923,7 @@ export default function Home() {
     }
 
     // Draw player positions
-    // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1450 for y)
+    // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1400 for y)
     // Scale to display canvas: x_display = (x_pitch / PITCH_CANVAS_W) * DISPLAY_WIDTH
     framePositions.forEach((pos) => {
       const x = (pos.x_pitch / PITCH_CANVAS_W) * RESULTS_PITCH_WIDTH
@@ -1025,7 +1175,7 @@ export default function Home() {
       return homographyFrameIndices.map(frameIdx => {
         // Find the anchor frame data if it exists
         const anchor = anchorFrames.find(af => af.frame_idx === frameIdx)
-        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [] }
+        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [], lines: [] }
       })
     }
     // Fall back to local anchor frames (before processing)
@@ -1037,7 +1187,7 @@ export default function Home() {
     if (!loadingFrame && frameImageRef.current && anchorFrames.length > 0) {
       drawFrameWithPoints()
     }
-  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame])
+  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame, pendingLinePoint1])
 
   // Redraw pitch diagram when pending click changes or annotations change
   useEffect(() => {
@@ -1199,7 +1349,7 @@ export default function Home() {
                 <span>
                   Anchor {currentAnchorIdx + 1} of {anchorFrames.length} |
                   Frame {currentAnchor.frame_idx} |
-                  Points: {currentAnchor.points.length}/4+
+                  Points: {currentAnchor.points.length}/4+ | Lines: {currentAnchor.lines?.length || 0}
                 </span>
                 <div className="anchor-actions">
                   <button
@@ -1220,9 +1370,66 @@ export default function Home() {
 
             {!currentAnchor?.isSkipped && (
               <>
+                {/* Annotation Mode Toggle */}
+                <div className="annotation-mode-toggle">
+                  <label className="mode-label">Annotation Mode:</label>
+                  <div className="mode-buttons">
+                    <button
+                      className={`mode-btn ${annotationMode === 'point' ? 'active' : ''}`}
+                      onClick={() => {
+                        setAnnotationMode('point')
+                        setPendingLinePoint1(null)
+                      }}
+                    >
+                      📍 Point Mode
+                    </button>
+                    <button
+                      className={`mode-btn ${annotationMode === 'line' ? 'active' : ''}`}
+                      onClick={() => {
+                        setAnnotationMode('line')
+                        setPendingFrameClick(null)
+                      }}
+                    >
+                      📏 Line Mode
+                    </button>
+                  </div>
+
+                  {annotationMode === 'line' && (
+                    <div className="line-selector">
+                      <label>Select Line:</label>
+                      <select
+                        value={selectedLineId}
+                        onChange={(e) => setSelectedLineId(e.target.value)}
+                      >
+                        {Object.entries(AVAILABLE_LINES).map(([id, info]) => (
+                          <option key={id} value={id}>
+                            {info.label} (Y={info.y_meters}m)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
                 {/* Instructions */}
                 <div className="annotation-instructions">
-                  {pendingFrameClick ? (
+                  {annotationMode === 'line' ? (
+                    pendingLinePoint1 ? (
+                      <p className="pending-instruction line-mode">
+                        ✓ First point selected at ({pendingLinePoint1.x}, {pendingLinePoint1.y}).
+                        <strong> Click the second point on the {AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}.</strong>
+                        <button onClick={cancelLineAnnotation} className="cancel-btn">
+                          Cancel
+                        </button>
+                      </p>
+                    ) : (
+                      <p className="line-mode-instruction">
+                        📏 <strong>Line Mode:</strong> Click two points on the <em>{AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}</em> in the video frame.
+                        <br />
+                        <small>Line constraints improve homography accuracy in midfield regions where point intersections aren't visible.</small>
+                      </p>
+                    )
+                  ) : pendingFrameClick ? (
                     <p className="pending-instruction">
                       ✓ Frame point selected at ({pendingFrameClick.x}, {pendingFrameClick.y}).
                       <strong> Now click the corresponding point on the pitch diagram →</strong>
@@ -1234,7 +1441,7 @@ export default function Home() {
                       </button>
                     </p>
                   ) : (
-                    <p>Click a point on the video frame, then select the corresponding pitch location on the diagram.</p>
+                    <p>📍 <strong>Point Mode:</strong> Click a point on the video frame, then select the corresponding pitch location on the diagram.</p>
                   )}
                 </div>
 
@@ -1252,7 +1459,7 @@ export default function Home() {
                       <canvas
                         ref={frameCanvasRef}
                         onClick={handleFrameClick}
-                        className={`frame-canvas ${pendingFrameClick ? 'has-pending' : ''}`}
+                        className={`frame-canvas ${annotationMode === 'line' ? 'line-mode' : ''} ${pendingFrameClick || pendingLinePoint1 ? 'has-pending' : ''}`}
                       />
                     )}
                   </div>
@@ -1286,6 +1493,27 @@ export default function Home() {
                             <small>Frame: ({point.x_img}, {point.y_img})</small>
                           </span>
                           <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Current lines list */}
+                {currentAnchor && currentAnchor.lines && currentAnchor.lines.length > 0 && (
+                  <div className="lines-list">
+                    <h4>📏 Annotated Lines ({currentAnchor.lines.length}):</h4>
+                    <div className="lines-grid">
+                      {currentAnchor.lines.map((line, idx) => (
+                        <div key={idx} className="line-item">
+                          <span>
+                            <strong>{AVAILABLE_LINES[line.line_id]?.label || line.line_id}</strong>
+                            <br/>
+                            <small>
+                              ({Math.round(line.u1)}, {Math.round(line.v1)}) → ({Math.round(line.u2)}, {Math.round(line.v2)})
+                            </small>
+                          </span>
+                          <button onClick={() => removeLine(idx)} className="remove-btn">×</button>
                         </div>
                       ))}
                     </div>

@@ -7,7 +7,7 @@ coordinate space. This matches the original research notebook exactly.
 
     Image pixels (camera) → Homography → Pitch canvas pixels → Distortion → Output
 
-The pitch canvas is a fixed size (e.g., 850 × 1450 pixels) used for:
+The pitch canvas is a fixed size (e.g., 850 × 1400 pixels) used for:
     - Visualization
     - Analysis
     - Interpolation
@@ -31,11 +31,11 @@ from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
 
 # Pitch canvas dimensions (pixels) - the canonical coordinate space
 PITCH_CANVAS_W = OUT_W  # e.g., 850 pixels
-PITCH_CANVAS_H = OUT_H  # e.g., 1450 pixels
+PITCH_CANVAS_H = OUT_H  # e.g., 1400 pixels
 
 # Pitch dimensions in meters (only used to compute normalized vertex positions)
 PITCH_METERS_W = 85.0
-PITCH_METERS_H = 145.0
+PITCH_METERS_H = 140.0
 
 
 def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:

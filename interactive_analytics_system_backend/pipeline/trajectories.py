@@ -1,7 +1,7 @@
 """Trajectory interpolation for player positions in pitch-pixel space.
 
 This module interpolates player positions between anchor frames.
-All interpolation happens in PITCH CANVAS PIXEL coordinates (e.g., 850 × 1450).
+All interpolation happens in PITCH CANVAS PIXEL coordinates (e.g., 850 × 1400).
 
 Coordinate System:
 ==================

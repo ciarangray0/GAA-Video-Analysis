@@ -1,6 +1,6 @@
 """Tests for player mapping to pitch canvas coordinates.
 
-The canonical coordinate system is PITCH CANVAS PIXELS (e.g., 850 × 1450).
+The canonical coordinate system is PITCH CANVAS PIXELS (e.g., 850 × 1400).
 All player positions are in this space, with radial distortion applied.
 """
 import numpy as np

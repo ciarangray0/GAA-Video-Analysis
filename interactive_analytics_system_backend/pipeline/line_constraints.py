@@ -76,7 +76,7 @@ GAA_PITCH_LINES = {
 }
 
 # Pitch dimensions
-PITCH_METERS_H = 145.0  # Total height including goal area
+PITCH_METERS_H = 140.0  # Total pitch height in meters
 
 
 def get_line_y_canvas(line_id: str) -> float:

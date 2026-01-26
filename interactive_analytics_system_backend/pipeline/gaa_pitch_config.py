@@ -13,8 +13,8 @@ GAA_PITCH_VERTICES = {
     # Goal centers
     "top_goal_lp": (39.25, 0.0),
     "top_goal_rp": (45.75, 0.0),
-    "bottom_goal_lp": (39.25, 145.0),
-    "bottom_goal_rp": (45.75, 145.0),
+    "bottom_goal_lp": (39.25, 140.0),
+    "bottom_goal_rp": (45.75, 140.0),
 
     # goalie box
     "left_box_bottom": (35.5, GAA_PITCH_LENGTH - 4.5),

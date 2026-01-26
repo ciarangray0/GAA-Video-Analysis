@@ -30,15 +30,15 @@ class TestLineConfiguration:
 
     def test_get_line_y_canvas_valid(self):
         """Test converting valid line IDs to canvas Y coordinates."""
-        # 20m line at top should be at ~200 pixels (20m / 145m * 1450px)
+        # 20m line at top should be at ~200 pixels (20m / 140m * 1400px)
         y = get_line_y_canvas("20m_top")
-        expected = 20.0 / 145.0 * OUT_H
+        expected = 20.0 / 140.0 * OUT_H
         assert abs(y - expected) < 0.01
 
     def test_get_line_y_canvas_halfway(self):
         """Test halfway line is at center."""
         y = get_line_y_canvas("halfway")
-        expected = 70.0 / 145.0 * OUT_H
+        expected = 70.0 / 140.0 * OUT_H
         assert abs(y - expected) < 0.01
 
     def test_get_line_y_canvas_invalid(self):

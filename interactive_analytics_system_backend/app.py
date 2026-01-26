@@ -695,7 +695,7 @@ async def get_player_positions(video_id: str):
 @app.post("/process-video", response_model=ProcessVideoResponse)
 async def process_video(
     file: UploadFile = File(...),
-    annotations_json: str = Form(..., description="JSON string of pitch annotations for anchor frames"),
+    annotations_json: str = Form(..., description="JSON string of pitch annotations for anchor frames (supports both v1 PitchAnnotation and v2 AnchorFrameAnnotation with lines)"),
     start_frame: int = Form(0, description="First frame to process (for trimming)"),
     end_frame: Optional[int] = Form(None, description="Last frame to process (for trimming), None means end of video")
 ):
@@ -705,14 +705,17 @@ async def process_video(
     Steps:
     1. Upload video
     2. Run YOLOv8n + ByteTrack tracking
-    3. Compute homographies at anchor frames
+    3. Compute homographies at anchor frames (with line constraints if provided)
     4. Map players to pitch coordinates
     5. Interpolate player trajectories
     6. Return JSON pitch coordinates
     
     Args:
         file: MP4 video file
-        annotations_json: JSON string of pitch annotations for anchor frames
+        annotations_json: JSON string of pitch annotations for anchor frames.
+                         Supports both formats:
+                         - v1: [{"frame_idx": 0, "points": [...]}]
+                         - v2: [{"frame_idx": 0, "points": [...], "lines": [...]}]
         start_frame: First frame to process (for trimming)
         end_frame: Last frame to process (for trimming), None means end of video
 
@@ -757,18 +760,54 @@ async def process_video(
         save_detections(video_id, detections)
         
         # Step 3: Compute homographies at anchor frames
-        # Parse annotations JSON
+        # Parse annotations JSON - detect format (v1 or v2)
         try:
             annotations_list = json.loads(annotations_json)
-            annotations = [PitchAnnotation(**ann) for ann in annotations_list]
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid annotations format. Expected JSON array of PitchAnnotation objects.")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in annotations: {e}")
 
-        annotations_dict = {}
-        for ann in annotations:
-            annotations_dict[ann.frame_idx] = ann.points
-        
-        homographies = compute_homographies_from_annotations(annotations_dict)
+        # Check if annotations include line constraints (v2 format)
+        has_lines = any('lines' in ann and ann['lines'] for ann in annotations_list)
+
+        if has_lines:
+            # Use v2 line-constrained homography
+            logger.info(f"Using line-constrained homography (v2) for video {video_id}")
+            try:
+                annotations = [AnchorFrameAnnotation(**ann) for ann in annotations_list]
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid v2 annotations format: {e}")
+
+            annotations_dict = {}
+            for ann in annotations:
+                annotations_dict[ann.frame_idx] = {
+                    "keypoints": ann.points,
+                    "lines": ann.lines
+                }
+
+            homographies, computation_info = compute_homographies_with_lines(
+                annotations_dict,
+                num_samples_per_line=10,
+                max_iterations=3,
+                keypoint_weight=3
+            )
+
+            # Log line constraint usage
+            total_lines = sum(info.get('valid_lines', 0) for info in computation_info.values())
+            logger.info(f"Line-constrained homography used {total_lines} line constraints")
+        else:
+            # Use v1 standard homography (backwards compatible)
+            logger.info(f"Using standard homography (v1) for video {video_id}")
+            try:
+                annotations = [PitchAnnotation(**ann) for ann in annotations_list]
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid annotations format: {e}")
+
+            annotations_dict = {}
+            for ann in annotations:
+                annotations_dict[ann.frame_idx] = ann.points
+
+            homographies = compute_homographies_from_annotations(annotations_dict)
+
         if not homographies:
             raise HTTPException(status_code=400, detail="No valid homographies computed. Need at least 4 points per frame.")
         

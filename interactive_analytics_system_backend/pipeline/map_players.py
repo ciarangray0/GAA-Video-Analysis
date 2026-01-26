@@ -7,7 +7,7 @@ used for all visualization and analysis.
 Coordinate System:
 ==================
 - Input: Image pixels (camera frame from video)
-- Output: Pitch canvas pixels (e.g., 850 × 1450 fixed canvas)
+- Output: Pitch canvas pixels (e.g., 850 × 1400 fixed canvas)
 
 The mapping applies:
 1. Homography transformation (image → pitch canvas)
