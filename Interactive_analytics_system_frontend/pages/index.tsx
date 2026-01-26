@@ -26,6 +26,10 @@ interface ProcessResponse {
   video_id: string
   status: string
   player_positions?: PlayerPosition[]
+  homography_frames?: number[]
+  start_frame?: number
+  end_frame?: number
+  fps?: number
 }
 
 interface VideoMetadata {
@@ -67,18 +71,41 @@ export default function Home() {
   const [playerPositions, setPlayerPositions] = useState<PlayerPosition[]>([])
   const [currentFrame, setCurrentFrame] = useState(0)
 
+  // Results playback state
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [playbackSpeed, setPlaybackSpeed] = useState(1) // 1x, 0.5x, 2x
+  const [isSyncMode, setIsSyncMode] = useState(true)
+  const [showHomographySidebar, setShowHomographySidebar] = useState(false)
+  const [selectedHomographyFrame, setSelectedHomographyFrame] = useState<number | null>(null)
+  const [processedStartFrame, setProcessedStartFrame] = useState(0)
+  const [processedEndFrame, setProcessedEndFrame] = useState(0)
+  const [homographyFrameIndices, setHomographyFrameIndices] = useState<number[]>([])
+  const [processedFps, setProcessedFps] = useState(25)
+
   // Refs
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement>(null)
   const frameImageRef = useRef<HTMLImageElement | null>(null)
+  const videoPlayerRef = useRef<HTMLVideoElement>(null)
+  const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const resultsFrameCanvasRef = useRef<HTMLCanvasElement>(null)
+  const resultsFrameImageRef = useRef<HTMLImageElement | null>(null)
 
-  // Pitch dimensions for display
-  const PITCH_DISPLAY_WIDTH = 340
-  const PITCH_DISPLAY_HEIGHT = 560
+  // Backend pitch canvas dimensions (canonical coordinate space)
+  // All player positions from backend are in this pixel space
+  const PITCH_CANVAS_W = 850
+  const PITCH_CANVAS_H = 1450
 
-  // Actual GAA pitch dimensions in meters
+  // Display canvas dimensions - MUST maintain same aspect ratio as backend canvas
+  // Aspect ratio = 850/1450 = 0.5862
+  // We scale down to fit the UI while preserving exact proportions
+  const DISPLAY_SCALE = 0.4  // 40% of backend canvas size
+  const PITCH_DISPLAY_WIDTH = Math.round(PITCH_CANVAS_W * DISPLAY_SCALE)   // 340
+  const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 580
+
+  // Actual GAA pitch dimensions in meters (145m includes goal area)
   const GAA_PITCH_WIDTH = 85.0
-  const GAA_PITCH_LENGTH = 140.0
+  const GAA_PITCH_LENGTH = 145.0
 
   // Pitch canvas ref for the diagram
   const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
@@ -627,9 +654,19 @@ export default function Home() {
       
       if (data.status === 'completed' && data.player_positions) {
         setPlayerPositions(data.player_positions)
+        setProcessedStartFrame(data.start_frame || 0)
+        setProcessedEndFrame(data.end_frame || 0)
+        setHomographyFrameIndices(data.homography_frames || [])
+        setProcessedFps(data.fps || videoMetadata.fps)
+
+        // Set initial frame to first frame with positions
+        const firstFrameWithPositions = data.player_positions.length > 0
+          ? Math.min(...data.player_positions.map(p => p.frame_idx))
+          : data.start_frame || 0
+        setCurrentFrame(firstFrameWithPositions)
+
         setStatus('Processing completed!')
-        setCurrentFrame(0)
-        drawPitch(data.player_positions, 0)
+        drawPitch(data.player_positions, firstFrameWithPositions)
       } else {
         setError('Processing completed but no positions returned')
       }
@@ -671,21 +708,27 @@ export default function Home() {
     // Filter positions for current frame
     const framePositions = positions.filter(p => p.frame_idx === frame)
 
-    // Draw player positions (scale from meters to canvas pixels)
+    // Draw player positions
+    // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1450 for y)
+    // Scale to display canvas: x_display = (x_pitch / PITCH_CANVAS_W) * DISPLAY_WIDTH
     framePositions.forEach((pos, idx) => {
-      const x = (pos.x_pitch / GAA_PITCH_WIDTH) * RESULTS_PITCH_WIDTH
-      const y = (pos.y_pitch / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+      const x = (pos.x_pitch / PITCH_CANVAS_W) * RESULTS_PITCH_WIDTH
+      const y = (pos.y_pitch / PITCH_CANVAS_H) * RESULTS_PITCH_HEIGHT
+
+      // Clamp to canvas bounds
+      const clampedX = Math.max(0, Math.min(RESULTS_PITCH_WIDTH, x))
+      const clampedY = Math.max(0, Math.min(RESULTS_PITCH_HEIGHT, y))
 
       // Draw player as circle
       ctx.fillStyle = idx % 2 === 0 ? '#ff0000' : '#0000ff'
       ctx.beginPath()
-      ctx.arc(x, y, 8, 0, 2 * Math.PI)
+      ctx.arc(clampedX, clampedY, 8, 0, 2 * Math.PI)
       ctx.fill()
 
       // Draw track ID
       ctx.fillStyle = '#ffffff'
       ctx.font = '12px Arial'
-      ctx.fillText(pos.track_id.toString(), x + 10, y - 10)
+      ctx.fillText(pos.track_id.toString(), clampedX + 10, clampedY - 10)
     })
 
     // Draw frame info
@@ -694,6 +737,154 @@ export default function Home() {
     ctx.fillText(`Frame: ${frame}`, 10, 30)
     ctx.fillText(`Players: ${framePositions.length}`, 10, 50)
   }
+
+  // Calculate the valid frame range based on trim settings
+  const getValidFrameRange = useCallback(() => {
+    if (!videoMetadata) return { startFrame: 0, endFrame: 0 }
+    const startFrame = Math.floor(trimStartSeconds * videoMetadata.fps)
+    const endFrame = trimEndSeconds
+      ? Math.floor(trimEndSeconds * videoMetadata.fps)
+      : videoMetadata.num_frames - 1
+    return { startFrame, endFrame }
+  }, [videoMetadata, trimStartSeconds, trimEndSeconds])
+
+  // Get frames that have player positions
+  const getFramesWithPositions = useCallback(() => {
+    const frames = new Set(playerPositions.map(p => p.frame_idx))
+    return Array.from(frames).sort((a, b) => a - b)
+  }, [playerPositions])
+
+  // Load frame image for results view
+  const loadResultsFrame = useCallback(async (frameIdx: number) => {
+    if (!videoMetadata) return
+
+    const url = `${API_URL}/videos/${videoMetadata.video_id}/frame/${frameIdx}`
+
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+
+    img.onload = () => {
+      resultsFrameImageRef.current = img
+      const canvas = resultsFrameCanvasRef.current
+      if (canvas) {
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          const maxWidth = 640
+          const scale = Math.min(1, maxWidth / img.naturalWidth)
+          canvas.width = img.naturalWidth * scale
+          canvas.height = img.naturalHeight * scale
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        }
+      }
+    }
+
+    img.src = `${url}?t=${Date.now()}`
+  }, [videoMetadata])
+
+  // Playback controls
+  const startPlayback = useCallback(() => {
+    if (playbackIntervalRef.current) {
+      clearInterval(playbackIntervalRef.current)
+    }
+
+    const framesWithPositions = getFramesWithPositions()
+    if (framesWithPositions.length === 0) return
+
+    setIsPlaying(true)
+
+    const fps = processedFps || videoMetadata?.fps || 25
+    const intervalMs = (1000 / fps) / playbackSpeed
+
+    playbackIntervalRef.current = setInterval(() => {
+      setCurrentFrame(prev => {
+        const currentIdx = framesWithPositions.indexOf(prev)
+        const nextIdx = currentIdx + 1
+
+        if (nextIdx >= framesWithPositions.length) {
+          // Stop at end
+          stopPlayback()
+          return prev
+        }
+
+        return framesWithPositions[nextIdx]
+      })
+    }, intervalMs)
+  }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
+
+  const stopPlayback = useCallback(() => {
+    if (playbackIntervalRef.current) {
+      clearInterval(playbackIntervalRef.current)
+      playbackIntervalRef.current = null
+    }
+    setIsPlaying(false)
+  }, [])
+
+  const togglePlayback = useCallback(() => {
+    if (isPlaying) {
+      stopPlayback()
+    } else {
+      startPlayback()
+    }
+  }, [isPlaying, startPlayback, stopPlayback])
+
+  const goToFrame = useCallback((frameIdx: number) => {
+    const framesWithPositions = getFramesWithPositions()
+    if (framesWithPositions.length === 0) return
+
+    // Find nearest valid frame
+    let nearest = framesWithPositions[0]
+    let minDist = Math.abs(frameIdx - nearest)
+
+    for (const f of framesWithPositions) {
+      const dist = Math.abs(frameIdx - f)
+      if (dist < minDist) {
+        minDist = dist
+        nearest = f
+      }
+    }
+
+    setCurrentFrame(nearest)
+  }, [getFramesWithPositions])
+
+  const skipFrames = useCallback((delta: number) => {
+    const framesWithPositions = getFramesWithPositions()
+    if (framesWithPositions.length === 0) return
+
+    const currentIdx = framesWithPositions.indexOf(currentFrame)
+    const newIdx = Math.max(0, Math.min(framesWithPositions.length - 1, currentIdx + delta))
+    setCurrentFrame(framesWithPositions[newIdx])
+  }, [currentFrame, getFramesWithPositions])
+
+  // Sync video player with current frame
+  useEffect(() => {
+    if (isSyncMode && videoPlayerRef.current && videoMetadata && playerPositions.length > 0) {
+      const timeInSeconds = currentFrame / videoMetadata.fps
+      if (Math.abs(videoPlayerRef.current.currentTime - timeInSeconds) > 0.1) {
+        videoPlayerRef.current.currentTime = timeInSeconds
+      }
+    }
+  }, [currentFrame, isSyncMode, videoMetadata, playerPositions.length])
+
+  // Load results frame when current frame changes
+  useEffect(() => {
+    if (playerPositions.length > 0 && videoMetadata) {
+      loadResultsFrame(currentFrame)
+    }
+  }, [currentFrame, playerPositions.length, videoMetadata, loadResultsFrame])
+
+  // Cleanup playback on unmount
+  useEffect(() => {
+    return () => {
+      if (playbackIntervalRef.current) {
+        clearInterval(playbackIntervalRef.current)
+      }
+    }
+  }, [])
+
+  // Get anchor frames that were used for homography (non-skipped with 4+ points)
+  const getHomographyFrames = useCallback(() => {
+    return anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4)
+  }, [anchorFrames])
 
   // Redraw frame when annotations change or image loads
   useEffect(() => {
@@ -1011,29 +1202,186 @@ export default function Home() {
         {/* Step 4: View Results */}
         {playerPositions.length > 0 && (
           <div className="results-section">
-            <h2>4. Player Positions</h2>
-            <div className="pitch-container">
-              <div>
-                <canvas
-                  ref={canvasRef}
-                  width={PITCH_DISPLAY_WIDTH}
-                  height={PITCH_DISPLAY_HEIGHT}
-                  className="pitch-canvas"
-                />
-                <div className="frame-controls">
-                  <button onClick={() => setCurrentFrame(Math.max(0, currentFrame - 1))}>
-                    Previous Frame
-                  </button>
-                  <span>
-                    Frame {currentFrame} / {playerPositions.length > 0 ? Math.max(...playerPositions.map(p => p.frame_idx)) : 0}
-                  </span>
-                  <button onClick={() => {
-                    const maxFrame = playerPositions.length > 0 ? Math.max(...playerPositions.map(p => p.frame_idx)) : 0
-                    setCurrentFrame(Math.min(maxFrame, currentFrame + 1))
-                  }}>
-                    Next Frame
-                  </button>
+            <h2>4. Player Tracking Results</h2>
+
+            {/* Processing info */}
+            <div className="processing-info">
+              <p>
+                <strong>Processed frames:</strong> {processedStartFrame} - {processedEndFrame} |
+                <strong> Total detections:</strong> {playerPositions.length} |
+                <strong> Unique frames with players:</strong> {getFramesWithPositions().length} |
+                <strong> Homography anchors:</strong> {homographyFrameIndices.length}
+              </p>
+            </div>
+
+            {/* Playback controls */}
+            <div className="playback-controls">
+              <div className="playback-buttons">
+                <button onClick={() => skipFrames(-10)} title="Back 10 frames">⏪</button>
+                <button onClick={() => skipFrames(-1)} title="Previous frame">◀</button>
+                <button onClick={togglePlayback} className="play-btn">
+                  {isPlaying ? '⏸ Pause' : '▶ Play'}
+                </button>
+                <button onClick={() => skipFrames(1)} title="Next frame">▶</button>
+                <button onClick={() => skipFrames(10)} title="Forward 10 frames">⏩</button>
+              </div>
+
+              <div className="playback-options">
+                <label>
+                  Speed:
+                  <select value={playbackSpeed} onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}>
+                    <option value={0.25}>0.25x</option>
+                    <option value={0.5}>0.5x</option>
+                    <option value={1}>1x</option>
+                    <option value={2}>2x</option>
+                    <option value={4}>4x</option>
+                  </select>
+                </label>
+
+                <button
+                  onClick={() => setIsSyncMode(!isSyncMode)}
+                  className={`sync-btn ${isSyncMode ? 'active' : ''}`}
+                >
+                  🔗 {isSyncMode ? 'Sync ON' : 'Sync OFF'}
+                </button>
+
+                <button
+                  onClick={() => setShowHomographySidebar(!showHomographySidebar)}
+                  className={`sidebar-toggle ${showHomographySidebar ? 'active' : ''}`}
+                >
+                  📐 Homography Info
+                </button>
+              </div>
+            </div>
+
+            {/* Frame slider */}
+            <div className="frame-slider">
+              <input
+                type="range"
+                min={getFramesWithPositions()[0] || 0}
+                max={getFramesWithPositions()[getFramesWithPositions().length - 1] || 100}
+                value={currentFrame}
+                onChange={(e) => goToFrame(parseInt(e.target.value))}
+                className="slider"
+              />
+              <span className="frame-info">
+                Frame {currentFrame} / {getFramesWithPositions()[getFramesWithPositions().length - 1] || 0}
+                {videoMetadata && ` (${(currentFrame / videoMetadata.fps).toFixed(2)}s)`}
+              </span>
+            </div>
+
+            {/* Main content area */}
+            <div className="results-content">
+              {/* Homography Sidebar */}
+              {showHomographySidebar && (
+                <div className="homography-sidebar">
+                  <h3>📐 Homography Details</h3>
+                  <p className="sidebar-info">
+                    Homographies computed from {getHomographyFrames().length} anchor frames.
+                    Click an anchor frame to see details.
+                  </p>
+
+                  <div className="anchor-frame-list">
+                    {getHomographyFrames().map((af, idx) => (
+                      <div
+                        key={idx}
+                        className={`anchor-frame-item ${selectedHomographyFrame === af.frame_idx ? 'selected' : ''}`}
+                        onClick={() => setSelectedHomographyFrame(
+                          selectedHomographyFrame === af.frame_idx ? null : af.frame_idx
+                        )}
+                      >
+                        <span className="frame-badge">Frame {af.frame_idx}</span>
+                        <span className="points-count">{af.points.length} points</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {selectedHomographyFrame !== null && (
+                    <div className="homography-detail">
+                      <h4>Frame {selectedHomographyFrame} Annotations</h4>
+                      <div className="point-mapping-list">
+                        {anchorFrames
+                          .find(af => af.frame_idx === selectedHomographyFrame)
+                          ?.points.map((point, idx) => (
+                            <div key={idx} className="point-mapping">
+                              <span className="pitch-label">{getPointLabel(point.pitch_id)}</span>
+                              <span className="arrow">→</span>
+                              <span className="coords">({point.x_img}, {point.y_img})</span>
+                            </div>
+                          ))
+                        }
+                      </div>
+                      <p className="homography-note">
+                        These pixel-to-pitch mappings define the perspective transform
+                        used to project player positions onto the 2D pitch view.
+                      </p>
+                    </div>
+                  )}
                 </div>
+              )}
+
+              {/* Side-by-side view */}
+              <div className={`results-main ${showHomographySidebar ? 'with-sidebar' : ''}`}>
+                {/* Video frame view */}
+                <div className="video-frame-panel">
+                  <h4>Video Frame</h4>
+                  {videoFile && (
+                    <video
+                      ref={videoPlayerRef}
+                      src={URL.createObjectURL(videoFile)}
+                      className="results-video"
+                      muted
+                      onTimeUpdate={() => {
+                        if (isSyncMode && videoPlayerRef.current && videoMetadata && !isPlaying) {
+                          const frameFromVideo = Math.round(videoPlayerRef.current.currentTime * videoMetadata.fps)
+                          if (Math.abs(frameFromVideo - currentFrame) > 1) {
+                            goToFrame(frameFromVideo)
+                          }
+                        }
+                      }}
+                    />
+                  )}
+                  {!videoFile && (
+                    <canvas
+                      ref={resultsFrameCanvasRef}
+                      className="results-frame-canvas"
+                    />
+                  )}
+                </div>
+
+                {/* 2D Pitch view */}
+                <div className="pitch-view-panel">
+                  <h4>2D Pitch View</h4>
+                  <canvas
+                    ref={canvasRef}
+                    width={PITCH_DISPLAY_WIDTH}
+                    height={PITCH_DISPLAY_HEIGHT}
+                    className="pitch-canvas"
+                  />
+                  <div className="pitch-legend">
+                    <span>🔴 Players (even IDs)</span>
+                    <span>🔵 Players (odd IDs)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Player list for current frame */}
+            <div className="current-frame-players">
+              <h4>Players in Frame {currentFrame}</h4>
+              <div className="player-list">
+                {playerPositions
+                  .filter(p => p.frame_idx === currentFrame)
+                  .map((pos, idx) => (
+                    <span key={idx} className="player-badge">
+                      #{pos.track_id}: ({pos.x_pitch.toFixed(1)}, {pos.y_pitch.toFixed(1)})
+                      <small>{pos.source}</small>
+                    </span>
+                  ))
+                }
+                {playerPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
+                  <span className="no-players">No players detected in this frame</span>
+                )}
               </div>
             </div>
           </div>

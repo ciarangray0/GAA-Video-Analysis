@@ -1,4 +1,16 @@
-"""Trajectory interpolation for player positions."""
+"""Trajectory interpolation for player positions in pitch-pixel space.
+
+This module interpolates player positions between anchor frames.
+All interpolation happens in PITCH CANVAS PIXEL coordinates (e.g., 850 × 1450).
+
+Coordinate System:
+==================
+- Input: Sparse positions at anchor frames (pitch canvas pixels)
+- Output: Dense positions for all frames (pitch canvas pixels)
+
+The interpolation is linear between known anchor frame positions.
+Meters are NOT used - all coordinates are pitch canvas pixels.
+"""
 from typing import List
 import numpy as np
 
@@ -13,14 +25,19 @@ def interpolate_trajectories(
     """
     Interpolate player trajectories between anchor frames using linear interpolation.
     
+    All coordinates are in PITCH CANVAS PIXELS (not meters).
+    Interpolation happens in this pixel space.
+
     Args:
         sparse_positions: List of PlayerPitchPosition with source="homography"
+                         Coordinates are in pitch canvas pixels
         start_frame: First frame to interpolate
         end_frame: Last frame to interpolate (inclusive)
     
     Returns:
         List of PlayerPitchPosition including both original anchor frames
         (source="homography") and interpolated frames (source="interpolated")
+        All coordinates are in pitch canvas pixels
     """
     # Filter positions in range
     filtered = [

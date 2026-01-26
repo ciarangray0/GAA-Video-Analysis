@@ -563,12 +563,21 @@ async def process_video(
         all_positions_sorted = sorted(all_positions, key=lambda p: (p.frame_idx, p.track_id))
         player_positions_cache[video_id] = all_positions_sorted
         
+        # Get frame range info
+        actual_start_frame = start_frame if start_frame else 0
+        actual_end_frame = end_frame if end_frame else metadata.get('num_frames', 0) - 1
+        video_fps = metadata.get('fps', 25)
+
         logger.info(f"Processing complete for video {video_id}: {len(all_positions_sorted)} positions")
 
         return ProcessVideoResponse(
             video_id=video_id,
             status="completed",
-            player_positions=all_positions_sorted
+            player_positions=all_positions_sorted,
+            homography_frames=list(homographies.keys()),
+            start_frame=actual_start_frame,
+            end_frame=actual_end_frame,
+            fps=video_fps
         )
         
     except HTTPException:

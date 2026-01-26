@@ -68,3 +68,7 @@ class ProcessVideoResponse(BaseModel):
     video_id: str
     status: str  # "processing" or "completed"
     player_positions: Optional[List[PlayerPitchPosition]] = None
+    homography_frames: Optional[List[int]] = None  # Frames where homographies were computed
+    start_frame: Optional[int] = None  # First frame processed
+    end_frame: Optional[int] = None  # Last frame processed
+    fps: Optional[float] = None  # Video FPS for playback

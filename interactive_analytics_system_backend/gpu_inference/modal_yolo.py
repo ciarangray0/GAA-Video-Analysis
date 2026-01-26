@@ -22,6 +22,16 @@ app = modal.App("gaa-yolo-tracking")
 # Define the container image with all dependencies
 yolo_image = (
     modal.Image.debian_slim(python_version="3.11")
+    # Install system dependencies for OpenCV
+    .apt_install(
+        "libglib2.0-0",
+        "libsm6",
+        "libxext6",
+        "libxrender-dev",
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "ffmpeg",
+    )
     .pip_install(
         "ultralytics>=8.0.0",
         "torch>=2.0.0",
@@ -30,11 +40,21 @@ yolo_image = (
         "numpy>=1.24.0",
         "lap>=0.4.0",  # Required for ByteTrack
         "fastapi[standard]",  # Required for web endpoints
+        "pydantic>=2.0.0",  # For request validation
     )
 )
 
 # Volume to cache the YOLO model weights
 model_cache = modal.Volume.from_name("yolo-model-cache", create_if_missing=True)
+
+
+# Pydantic model for request body
+from pydantic import BaseModel
+
+
+class TrackVideoRequest(BaseModel):
+    """Request body for tracking video."""
+    video_base64: str
 
 
 @app.cls(
@@ -60,10 +80,9 @@ class YOLOTracker:
         self.model = YOLO("yolov8n.pt")
         print("YOLO model loaded successfully")
 
-    @modal.method()
-    def track_video(self, video_bytes: bytes) -> List[Dict[str, Any]]:
+    def _run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
         """
-        Run YOLO + ByteTrack on video bytes.
+        Internal method to run YOLO + ByteTrack on video bytes.
 
         Args:
             video_bytes: Raw video file bytes
@@ -128,7 +147,7 @@ class YOLOTracker:
             os.unlink(temp_path)
 
     @modal.fastapi_endpoint(method="POST")
-    def track_video_endpoint(self, video_base64: str) -> Dict[str, Any]:
+    def track_video_endpoint(self, request: TrackVideoRequest) -> Dict[str, Any]:
         """
         Web endpoint for tracking video.
 
@@ -137,17 +156,19 @@ class YOLOTracker:
         import base64
 
         try:
-            video_bytes = base64.b64decode(video_base64)
-            detections = self.track_video(video_bytes)
+            video_bytes = base64.b64decode(request.video_base64)
+            detections = self._run_tracking(video_bytes)
             return {
                 "status": "success",
                 "detections": detections,
                 "count": len(detections),
             }
         except Exception as e:
+            import traceback
             return {
                 "status": "error",
                 "message": str(e),
+                "traceback": traceback.format_exc(),
             }
 
 
@@ -161,7 +182,7 @@ class YOLOTracker:
 def track_video_direct(video_bytes: bytes) -> List[Dict[str, Any]]:
     """Direct function call for tracking (for Modal SDK calls)."""
     tracker = YOLOTracker()
-    return tracker.track_video(video_bytes)
+    return tracker._run_tracking(video_bytes)
 
 
 # Local entrypoint for testing
