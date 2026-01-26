@@ -15,12 +15,11 @@ The pitch canvas is a fixed size (e.g., 850 × 1450 pixels) used for:
 
 IMPORTANT:
 - Meters are NOT used in this pipeline
-- Radial distortion is ALWAYS applied (not optional)
+- Radial distortion is ALWAYS applied
 - All player positions are in pitch canvas pixels
 - Interpolation happens in pitch-pixel space
 
-This design prioritizes visual correctness matching the notebook output
-over physical/metric correctness.
+This design prioritizes visual correctness over physical/metric correctness.
 """
 from typing import Tuple, Dict, List
 import numpy as np

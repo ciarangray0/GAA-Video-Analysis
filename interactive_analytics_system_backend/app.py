@@ -554,13 +554,9 @@ async def process_video(
 
         interpolated = interpolate_trajectories(positions_in_range, actual_start, actual_end)
 
-        # Combine sparse and interpolated positions
-        all_positions = positions_in_range + [
-            p for p in interpolated if p.source == "interpolated"
-        ]
-        
-        # Sort by frame_idx, then track_id
-        all_positions_sorted = sorted(all_positions, key=lambda p: (p.frame_idx, p.track_id))
+        # interpolate_trajectories already returns both original anchor positions
+        # and interpolated positions, so we use it directly
+        all_positions_sorted = sorted(interpolated, key=lambda p: (p.frame_idx, p.track_id))
         player_positions_cache[video_id] = all_positions_sorted
         
         # Get frame range info

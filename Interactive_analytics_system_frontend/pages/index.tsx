@@ -677,7 +677,7 @@ export default function Home() {
     }
   }
 
-  const drawPitch = (positions: PlayerPosition[], frame: number) => {
+  const drawPitch = useCallback((positions: PlayerPosition[], frame: number) => {
     const canvas = canvasRef.current
     if (!canvas) return
 
@@ -688,13 +688,26 @@ export default function Home() {
     const RESULTS_PITCH_WIDTH = PITCH_DISPLAY_WIDTH
     const RESULTS_PITCH_HEIGHT = PITCH_DISPLAY_HEIGHT
 
-    // Clear canvas
+    // Ensure canvas has correct dimensions
+    if (canvas.width !== RESULTS_PITCH_WIDTH || canvas.height !== RESULTS_PITCH_HEIGHT) {
+      canvas.width = RESULTS_PITCH_WIDTH
+      canvas.height = RESULTS_PITCH_HEIGHT
+    }
+
+    // Clear canvas with pitch color
     ctx.fillStyle = '#2d5016' // Green pitch color
     ctx.fillRect(0, 0, RESULTS_PITCH_WIDTH, RESULTS_PITCH_HEIGHT)
 
-    // Draw center line
+    // Draw pitch markings
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
+    ctx.lineWidth = 1
+
+    // Draw outer boundary
     ctx.strokeStyle = '#ffffff'
     ctx.lineWidth = 2
+    ctx.strokeRect(2, 2, RESULTS_PITCH_WIDTH - 4, RESULTS_PITCH_HEIGHT - 4)
+
+    // Draw center line (halfway)
     ctx.beginPath()
     ctx.moveTo(0, RESULTS_PITCH_HEIGHT / 2)
     ctx.lineTo(RESULTS_PITCH_WIDTH, RESULTS_PITCH_HEIGHT / 2)
@@ -702,7 +715,39 @@ export default function Home() {
 
     // Draw center circle
     ctx.beginPath()
-    ctx.arc(RESULTS_PITCH_WIDTH / 2, RESULTS_PITCH_HEIGHT / 2, 50, 0, 2 * Math.PI)
+    ctx.arc(RESULTS_PITCH_WIDTH / 2, RESULTS_PITCH_HEIGHT / 2, 40 * DISPLAY_SCALE, 0, 2 * Math.PI)
+    ctx.stroke()
+
+    // Draw 13m lines (approximately 9% from each end)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
+    ctx.lineWidth = 1
+    const line13mTop = (13 / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    const line13mBottom = ((GAA_PITCH_LENGTH - 13) / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    ctx.beginPath()
+    ctx.moveTo(0, line13mTop)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line13mTop)
+    ctx.moveTo(0, line13mBottom)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line13mBottom)
+    ctx.stroke()
+
+    // Draw 20m lines
+    const line20mTop = (20 / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    const line20mBottom = ((GAA_PITCH_LENGTH - 20) / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    ctx.beginPath()
+    ctx.moveTo(0, line20mTop)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line20mTop)
+    ctx.moveTo(0, line20mBottom)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line20mBottom)
+    ctx.stroke()
+
+    // Draw 45m lines
+    const line45mTop = (45 / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    const line45mBottom = ((GAA_PITCH_LENGTH - 45) / GAA_PITCH_LENGTH) * RESULTS_PITCH_HEIGHT
+    ctx.beginPath()
+    ctx.moveTo(0, line45mTop)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line45mTop)
+    ctx.moveTo(0, line45mBottom)
+    ctx.lineTo(RESULTS_PITCH_WIDTH, line45mBottom)
     ctx.stroke()
 
     // Filter positions for current frame
@@ -711,32 +756,44 @@ export default function Home() {
     // Draw player positions
     // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1450 for y)
     // Scale to display canvas: x_display = (x_pitch / PITCH_CANVAS_W) * DISPLAY_WIDTH
-    framePositions.forEach((pos, idx) => {
+    framePositions.forEach((pos) => {
       const x = (pos.x_pitch / PITCH_CANVAS_W) * RESULTS_PITCH_WIDTH
       const y = (pos.y_pitch / PITCH_CANVAS_H) * RESULTS_PITCH_HEIGHT
 
-      // Clamp to canvas bounds
-      const clampedX = Math.max(0, Math.min(RESULTS_PITCH_WIDTH, x))
-      const clampedY = Math.max(0, Math.min(RESULTS_PITCH_HEIGHT, y))
+      // Clamp to canvas bounds with padding
+      const padding = 8
+      const clampedX = Math.max(padding, Math.min(RESULTS_PITCH_WIDTH - padding, x))
+      const clampedY = Math.max(padding, Math.min(RESULTS_PITCH_HEIGHT - padding, y))
 
-      // Draw player as circle
-      ctx.fillStyle = idx % 2 === 0 ? '#ff0000' : '#0000ff'
+      // Use track_id for consistent coloring (even = red team, odd = blue team)
+      const isEvenTeam = pos.track_id % 2 === 0
+      ctx.fillStyle = isEvenTeam ? '#ff3333' : '#3366ff'
+
+      // Draw player as filled circle with border
       ctx.beginPath()
       ctx.arc(clampedX, clampedY, 8, 0, 2 * Math.PI)
       ctx.fill()
 
-      // Draw track ID
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 2
+      ctx.stroke()
+
+      // Draw track ID label
       ctx.fillStyle = '#ffffff'
-      ctx.font = '12px Arial'
-      ctx.fillText(pos.track_id.toString(), clampedX + 10, clampedY - 10)
+      ctx.font = 'bold 10px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText(pos.track_id.toString(), clampedX, clampedY + 3)
     })
 
-    // Draw frame info
+    // Draw frame info in corner
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+    ctx.fillRect(5, 5, 120, 50)
     ctx.fillStyle = '#ffffff'
-    ctx.font = '16px Arial'
-    ctx.fillText(`Frame: ${frame}`, 10, 30)
-    ctx.fillText(`Players: ${framePositions.length}`, 10, 50)
-  }
+    ctx.font = '14px Arial'
+    ctx.textAlign = 'left'
+    ctx.fillText(`Frame: ${frame}`, 10, 25)
+    ctx.fillText(`Players: ${framePositions.length}`, 10, 45)
+  }, [PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H, GAA_PITCH_LENGTH, DISPLAY_SCALE])
 
   // Calculate the valid frame range based on trim settings
   const getValidFrameRange = useCallback(() => {
@@ -883,9 +940,19 @@ export default function Home() {
   }, [])
 
   // Get anchor frames that were used for homography (non-skipped with 4+ points)
+  // Use homographyFrameIndices from backend if available, otherwise fall back to local anchorFrames
   const getHomographyFrames = useCallback(() => {
+    // If we have homography frames from the backend, use those
+    if (homographyFrameIndices.length > 0) {
+      return homographyFrameIndices.map(frameIdx => {
+        // Find the anchor frame data if it exists
+        const anchor = anchorFrames.find(af => af.frame_idx === frameIdx)
+        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [] }
+      })
+    }
+    // Fall back to local anchor frames (before processing)
     return anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4)
-  }, [anchorFrames])
+  }, [anchorFrames, homographyFrameIndices])
 
   // Redraw frame when annotations change or image loads
   useEffect(() => {
@@ -901,11 +968,12 @@ export default function Home() {
     }
   }, [pendingFrameClick, anchorFrames, currentAnchorIdx, drawPitchDiagram])
 
+  // Redraw pitch with player positions when frame changes
   useEffect(() => {
     if (playerPositions.length > 0) {
       drawPitch(playerPositions, currentFrame)
     }
-  }, [currentFrame, playerPositions])
+  }, [currentFrame, playerPositions, drawPitch])
 
   const currentAnchor = anchorFrames[currentAnchorIdx]
 
@@ -1278,40 +1346,73 @@ export default function Home() {
                 <div className="homography-sidebar">
                   <h3>📐 Homography Details</h3>
                   <p className="sidebar-info">
-                    Homographies computed from {getHomographyFrames().length} anchor frames.
+                    Homographies computed from {homographyFrameIndices.length > 0 ? homographyFrameIndices.length : getHomographyFrames().length} anchor frames.
                     Click an anchor frame to see details.
                   </p>
 
                   <div className="anchor-frame-list">
-                    {getHomographyFrames().map((af, idx) => (
-                      <div
-                        key={idx}
-                        className={`anchor-frame-item ${selectedHomographyFrame === af.frame_idx ? 'selected' : ''}`}
-                        onClick={() => setSelectedHomographyFrame(
-                          selectedHomographyFrame === af.frame_idx ? null : af.frame_idx
-                        )}
-                      >
-                        <span className="frame-badge">Frame {af.frame_idx}</span>
-                        <span className="points-count">{af.points.length} points</span>
-                      </div>
-                    ))}
+                    {homographyFrameIndices.length > 0 ? (
+                      // Use homography frames from backend
+                      homographyFrameIndices.map((frameIdx, idx) => {
+                        const anchorData = anchorFrames.find(af => af.frame_idx === frameIdx)
+                        return (
+                          <div
+                            key={idx}
+                            className={`anchor-frame-item ${selectedHomographyFrame === frameIdx ? 'selected' : ''}`}
+                            onClick={() => setSelectedHomographyFrame(
+                              selectedHomographyFrame === frameIdx ? null : frameIdx
+                            )}
+                          >
+                            <span className="frame-badge">Frame {frameIdx}</span>
+                            <span className="points-count">
+                              {anchorData ? `${anchorData.points.length} points` : 'Computed'}
+                            </span>
+                          </div>
+                        )
+                      })
+                    ) : (
+                      // Fall back to local anchor frames
+                      getHomographyFrames().map((af, idx) => (
+                        <div
+                          key={idx}
+                          className={`anchor-frame-item ${selectedHomographyFrame === af.frame_idx ? 'selected' : ''}`}
+                          onClick={() => setSelectedHomographyFrame(
+                            selectedHomographyFrame === af.frame_idx ? null : af.frame_idx
+                          )}
+                        >
+                          <span className="frame-badge">Frame {af.frame_idx}</span>
+                          <span className="points-count">{af.points.length} points</span>
+                        </div>
+                      ))
+                    )}
                   </div>
 
                   {selectedHomographyFrame !== null && (
                     <div className="homography-detail">
                       <h4>Frame {selectedHomographyFrame} Annotations</h4>
-                      <div className="point-mapping-list">
-                        {anchorFrames
-                          .find(af => af.frame_idx === selectedHomographyFrame)
-                          ?.points.map((point, idx) => (
-                            <div key={idx} className="point-mapping">
-                              <span className="pitch-label">{getPointLabel(point.pitch_id)}</span>
-                              <span className="arrow">→</span>
-                              <span className="coords">({point.x_img}, {point.y_img})</span>
+                      {(() => {
+                        const anchorData = anchorFrames.find(af => af.frame_idx === selectedHomographyFrame)
+                        if (anchorData && anchorData.points.length > 0) {
+                          return (
+                            <div className="point-mapping-list">
+                              {anchorData.points.map((point, idx) => (
+                                <div key={idx} className="point-mapping">
+                                  <span className="pitch-label">{getPointLabel(point.pitch_id)}</span>
+                                  <span className="arrow">→</span>
+                                  <span className="coords">({point.x_img}, {point.y_img})</span>
+                                </div>
+                              ))}
                             </div>
-                          ))
+                          )
+                        } else {
+                          return (
+                            <p className="no-annotation-data">
+                              Annotation data for this frame is not available locally.
+                              The homography was computed on the server.
+                            </p>
+                          )
                         }
-                      </div>
+                      })()}
                       <p className="homography-note">
                         These pixel-to-pitch mappings define the perspective transform
                         used to project player positions onto the 2D pitch view.
