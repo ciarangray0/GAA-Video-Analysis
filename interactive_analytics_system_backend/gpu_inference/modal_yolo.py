@@ -77,7 +77,7 @@ class YOLOTracker:
         os.environ["YOLO_CONFIG_DIR"] = "/model_cache"
 
         # Load YOLOv8n model (will download on first run, then cached)
-        self.model = YOLO("yolov8n.pt")
+        self.model = YOLO("yolov8s.pt")
         print("YOLO model loaded successfully")
 
     def _run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
@@ -102,11 +102,10 @@ class YOLOTracker:
             # Run tracking
             results = self.model.track(
                 source=temp_path,
-                tracker="bytetrack.yaml",
+                tracker="botsort.yaml",
+                imgsz=960,
                 persist=True,
-                conf=0.3,
-                iou=0.5,
-                classes=[0],  # Only detect people (class 0 in COCO)
+                conf=0.35,
                 verbose=False,
                 stream=True,  # Stream results to reduce memory
             )

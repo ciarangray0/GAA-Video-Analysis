@@ -13,7 +13,7 @@ OUT_H = 1400
 K1 = 8e-8
 
 # YOLO model path from environment variable
-YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "models/best.pt")
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "models/v8s_960_v9.pt")
 
 # Default tracking confidence threshold
-DEFAULT_CONF = 0.1
+DEFAULT_CONF = 0.35
