@@ -1214,8 +1214,11 @@ export default function Home() {
   }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
 
   // Restart playback interval when playbackSpeed changes while playing.
-  // startPlayback is intentionally omitted from deps to avoid a re-render loop;
-  // the latest version is captured via closure each time playbackSpeed changes.
+  // `startPlayback` is wrapped with useCallback and already re-creates the
+  // interval using the latest `playbackSpeed` from its closure.  Including it
+  // in the dep array would cause an infinite restart loop because every speed
+  // change updates `startPlayback`, which would then fire this effect again.
+  // The eslint-disable is intentional and safe here.
   useEffect(() => {
     if (isPlaying) {
       startPlayback()

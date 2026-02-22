@@ -89,3 +89,36 @@ def test_interpolate_savgol_applied_for_long_tracks():
         assert 0.0 <= pos.x_pitch <= OUT_W
         assert 0.0 <= pos.y_pitch <= OUT_H
 
+
+def test_interpolate_cubic_spline_non_monotonic():
+    """Cubic spline handles a non-monotonic (oscillating) trajectory without crashing."""
+    # A zig-zag path: 0 → 800 → 0 across frames 0, 5, 10
+    sparse = [
+        PlayerPitchPosition(frame_idx=0,  track_id=6, x_pitch=0.0,   y_pitch=0.0,   source="homography"),
+        PlayerPitchPosition(frame_idx=5,  track_id=6, x_pitch=800.0, y_pitch=700.0,  source="homography"),
+        PlayerPitchPosition(frame_idx=10, track_id=6, x_pitch=0.0,   y_pitch=1400.0, source="homography"),
+    ]
+    interpolated = interpolate_trajectories(sparse, 0, 10)
+
+    assert len(interpolated) == 11
+    for pos in interpolated:
+        assert 0.0 <= pos.x_pitch <= OUT_W, f"x_pitch {pos.x_pitch} out of bounds"
+        assert 0.0 <= pos.y_pitch <= OUT_H, f"y_pitch {pos.y_pitch} out of bounds"
+
+
+def test_interpolate_extrapolation_uses_boundary_values():
+    """Frames outside the anchor range extrapolate using the nearest boundary value."""
+    # Anchors at frames 3 and 7, but we request frames 0..10
+    sparse = [
+        PlayerPitchPosition(frame_idx=3, track_id=7, x_pitch=100.0, y_pitch=200.0, source="homography"),
+        PlayerPitchPosition(frame_idx=7, track_id=7, x_pitch=400.0, y_pitch=600.0, source="homography"),
+    ]
+    interpolated = interpolate_trajectories(sparse, 0, 10)
+
+    frames_map = {p.frame_idx: p for p in interpolated if p.track_id == 7}
+
+    # Frame 0 should extrapolate as the value at frame 3 (linear boundary behaviour)
+    assert abs(frames_map[0].x_pitch - 100.0) < 1e-6
+    # Frame 10 should extrapolate as the value at frame 7
+    assert abs(frames_map[10].x_pitch - 400.0) < 1e-6
+
