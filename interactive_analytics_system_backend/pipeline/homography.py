@@ -21,6 +21,7 @@ IMPORTANT:
 
 This design prioritizes visual correctness over physical/metric correctness.
 """
+import re
 from typing import Tuple, Dict, List
 import numpy as np
 import cv2
@@ -48,6 +49,41 @@ def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:
     x_px = x_m / PITCH_METERS_W * PITCH_CANVAS_W
     y_px = y_m / PITCH_METERS_H * PITCH_CANVAS_H
     return x_px, y_px
+
+
+def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
+    """
+    Resolve a pitch_id string to (x_meters, y_meters) coordinates.
+
+    Supports two formats:
+    1. Named vertex: pitch_id must be a key in GAA_PITCH_VERTICES.
+       Returns the stored (x, y) tuple in meters.
+    2. Line point: pitch_id matches ``line_{name}_x{X}_y{Y}`` where X and Y
+       are floating-point meter values (e.g. ``line_45m_top_x25.3_y45.0``).
+       Returns (float(X), float(Y)).
+
+    Args:
+        pitch_id: Vertex name or encoded line-point identifier.
+
+    Returns:
+        Tuple of (x_meters, y_meters) in pitch coordinate space (meters).
+
+    Raises:
+        ValueError: If pitch_id is not a known vertex name and does not match
+                    the ``line_{name}_x{X}_y{Y}`` pattern.
+    """
+    if pitch_id in GAA_PITCH_VERTICES:
+        return GAA_PITCH_VERTICES[pitch_id]
+
+    # Try to parse line_{name}_x{X}_y{Y} format
+    match = re.match(r'^line_.+_x([-\d.]+)_y([-\d.]+)$', pitch_id)
+    if match:
+        return float(match.group(1)), float(match.group(2))
+
+    raise ValueError(
+        f"Unrecognized pitch_id: '{pitch_id}'. "
+        "Must be a known vertex name or follow the 'line_<name>_x<X>_y<Y>' format."
+    )
 
 
 def compute_homography(
@@ -168,7 +204,7 @@ def compute_homographies_from_annotations(
         # Extract pitch points from pitch_id and convert to canvas pixels
         # GAA_PITCH_VERTICES are in meters, we convert to canvas pixels
         pts_pitch_canvas = np.array([
-            _meters_to_canvas_pixels(*GAA_PITCH_VERTICES[p.pitch_id])
+            _meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id))
             for p in points
         ], dtype=np.float32)
         
@@ -242,7 +278,7 @@ def compute_homographies_with_lines(
         ], dtype=np.float32)
 
         pts_canvas = np.array([
-            _meters_to_canvas_pixels(*GAA_PITCH_VERTICES[p.pitch_id])
+            _meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id))
             for p in keypoints
         ], dtype=np.float32)
 
