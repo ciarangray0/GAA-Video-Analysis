@@ -126,6 +126,11 @@ export default function Home() {
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsFrameCanvasRef = useRef<HTMLCanvasElement>(null)
   const resultsFrameImageRef = useRef<HTMLImageElement | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
+  // Import/Export and copy status messages
+  const [importStatus, setImportStatus] = useState<string>('')
+  const [copyStatus, setCopyStatus] = useState<string>('')
 
   // Backend pitch canvas dimensions (canonical coordinate space)
   // All player positions from backend are in this pixel space
@@ -215,6 +220,27 @@ export default function Home() {
     "center_left": [0.0, 70.0],
     "center_right": [85.0, 70.0],
   }
+
+  // Pitch line segments for Type B (line-constrained) annotations
+  const PITCH_LINE_SEGMENTS: Array<{ name: string; x1: number; y1: number; x2: number; y2: number }> = [
+    { name: 'left_sideline', x1: 0, y1: 0, x2: 0, y2: 140 },
+    { name: 'right_sideline', x1: 85, y1: 0, x2: 85, y2: 140 },
+    { name: 'top_endline', x1: 0, y1: 0, x2: 85, y2: 0 },
+    { name: 'bottom_endline', x1: 0, y1: 140, x2: 85, y2: 140 },
+    { name: '13m_top', x1: 0, y1: 13, x2: 85, y2: 13 },
+    { name: '13m_bottom', x1: 0, y1: 127, x2: 85, y2: 127 },
+    { name: '20m_top', x1: 0, y1: 20, x2: 85, y2: 20 },
+    { name: '20m_bottom', x1: 0, y1: 120, x2: 85, y2: 120 },
+    { name: '45m_top', x1: 0, y1: 45, x2: 85, y2: 45 },
+    { name: '45m_bottom', x1: 0, y1: 95, x2: 85, y2: 95 },
+    { name: '65m_top', x1: 0, y1: 65, x2: 85, y2: 65 },
+    { name: '65m_bottom', x1: 0, y1: 75, x2: 85, y2: 75 },
+    { name: 'halfway', x1: 0, y1: 70, x2: 85, y2: 70 },
+    { name: 'left_13m_box_top_v', x1: 33, y1: 0, x2: 33, y2: 13 },
+    { name: 'left_13m_box_bottom_v', x1: 33, y1: 127, x2: 33, y2: 140 },
+    { name: 'right_13m_box_top_v', x1: 52, y1: 0, x2: 52, y2: 13 },
+    { name: 'right_13m_box_bottom_v', x1: 52, y1: 127, x2: 52, y2: 140 },
+  ]
 
   // Helper to convert pitch coordinates to canvas coordinates
   const pitchToCanvas = (pitchX: number, pitchY: number): { x: number; y: number } => {
@@ -566,6 +592,49 @@ export default function Home() {
 
       // Clear pending state
       setPendingFrameClick(null)
+      return
+    }
+
+    // No vertex found within 20px — try nearest pitch line segment (Type B click)
+    let nearestLine: typeof PITCH_LINE_SEGMENTS[0] | null = null
+    let nearestLineDist = Infinity
+    let lineT = 0
+
+    for (const seg of PITCH_LINE_SEGMENTS) {
+      const p1 = pitchToCanvas(seg.x1, seg.y1)
+      const p2 = pitchToCanvas(seg.x2, seg.y2)
+      const dx = p2.x - p1.x
+      const dy = p2.y - p1.y
+      const lenSq = dx * dx + dy * dy
+      const t = lenSq > 0 ? Math.max(0, Math.min(1, ((clickX - p1.x) * dx + (clickY - p1.y) * dy) / lenSq)) : 0
+      const projX = p1.x + t * dx
+      const projY = p1.y + t * dy
+      const dist = Math.sqrt(Math.pow(projX - clickX, 2) + Math.pow(projY - clickY, 2))
+      if (dist < nearestLineDist && dist < 15) {
+        nearestLineDist = dist
+        nearestLine = seg
+        lineT = t
+      }
+    }
+
+    if (nearestLine) {
+      const pitchX = nearestLine.x1 + lineT * (nearestLine.x2 - nearestLine.x1)
+      const pitchY = nearestLine.y1 + lineT * (nearestLine.y2 - nearestLine.y1)
+      const pitchId = `line_${nearestLine.name}_x${pitchX.toFixed(1)}_y${pitchY.toFixed(1)}`
+
+      const newPoint: PitchPoint = {
+        pitch_id: pitchId,
+        x_img: pendingFrameClick.x,
+        y_img: pendingFrameClick.y
+      }
+
+      setAnchorFrames(prev => {
+        const updated = [...prev]
+        updated[currentAnchorIdx].points.push(newPoint)
+        return updated
+      })
+
+      setPendingFrameClick(null)
     }
   }
 
@@ -673,6 +742,23 @@ export default function Home() {
     const currentAnchor = anchorFrames[currentAnchorIdx]
     const annotatedIds = currentAnchor ? currentAnchor.points.map(p => p.pitch_id) : []
 
+    // When pending click, subtly highlight all line segments to show they're clickable
+    if (pendingFrameClick) {
+      ctx.strokeStyle = 'rgba(255, 255, 100, 0.4)'
+      ctx.lineWidth = 6
+      for (const seg of PITCH_LINE_SEGMENTS) {
+        const p1 = pitchToCanvas(seg.x1, seg.y1)
+        const p2 = pitchToCanvas(seg.x2, seg.y2)
+        ctx.beginPath()
+        ctx.moveTo(p1.x, p1.y)
+        ctx.lineTo(p2.x, p2.y)
+        ctx.stroke()
+      }
+      // Reset for vertex drawing
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 2
+    }
+
     // Draw all vertex points
     for (const [id, coords] of Object.entries(GAA_PITCH_VERTICES)) {
       const pos = pitchToCanvas(coords[0], coords[1])
@@ -698,14 +784,17 @@ export default function Home() {
     // If there's a pending click, show instruction
     if (pendingFrameClick) {
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 40, PITCH_DISPLAY_WIDTH - 20, 30)
+      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 50, PITCH_DISPLAY_WIDTH - 20, 40)
       ctx.fillStyle = '#ffffff'
       ctx.font = 'bold 12px Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('Click a point on this pitch diagram', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 20)
+      ctx.fillText('Click a vertex (●) or anywhere on a line', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 30)
+      ctx.font = '10px Arial'
+      ctx.fillStyle = '#aaaaaa'
+      ctx.fillText(`Frame: (${pendingFrameClick.x}, ${pendingFrameClick.y})`, PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 14)
       ctx.textAlign = 'left'
     }
-  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pitchToCanvas])
+  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pitchToCanvas, PITCH_LINE_SEGMENTS])
 
   // Remove annotation point
   const removePoint = (pointIdx: number) => {
@@ -752,6 +841,81 @@ export default function Home() {
     })
 
     loadFrameImage(newFrameIdx)
+  }
+
+  // Export annotations as JSON download
+  const exportAnnotations = () => {
+    if (!anchorFrames.length) return
+    const data = {
+      video_filename: videoFile?.name || '',
+      exported_at: new Date().toISOString(),
+      anchor_frames: anchorFrames
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `annotations_${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Import annotations from JSON file
+  const importAnnotations = (file: File) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target?.result as string)
+        if (!data.anchor_frames || !Array.isArray(data.anchor_frames)) {
+          setImportStatus('Invalid file: missing anchor_frames array')
+          return
+        }
+        const warnings: string[] = []
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          data.anchor_frames.forEach((importedFrame: AnchorFrame) => {
+            const idx = updated.findIndex(f => f.frame_idx === importedFrame.frame_idx)
+            if (idx !== -1) {
+              updated[idx] = importedFrame
+            } else {
+              warnings.push(String(importedFrame.frame_idx))
+            }
+          })
+          return updated
+        })
+        const warnMsg = warnings.length > 0 ? ` Warning: frames not matched: ${warnings.join(', ')}` : ''
+        setImportStatus(`Imported ${data.anchor_frames.length} frames.${warnMsg}`)
+        setTimeout(() => setImportStatus(''), 5000)
+      } catch {
+        setImportStatus('Failed to parse JSON file')
+        setTimeout(() => setImportStatus(''), 5000)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  // Copy annotations from another anchor frame
+  const copyFromAnchor = (srcIdx: number) => {
+    const src = anchorFrames[srcIdx]
+    if (!src) return
+    const current = anchorFrames[currentAnchorIdx]
+    if (
+      (current.points.length > 0 || current.lines.length > 0) &&
+      !confirm(`Replace ${current.points.length} points and ${current.lines.length} lines with data from frame ${src.frame_idx}?`)
+    ) {
+      return
+    }
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx] = {
+        ...updated[currentAnchorIdx],
+        points: [...src.points],
+        lines: [...src.lines]
+      }
+      return updated
+    })
+    setCopyStatus(`Copied ${src.points.length} points from frame ${src.frame_idx}`)
+    setTimeout(() => setCopyStatus(''), 3000)
   }
 
   // Process video with annotations
@@ -1049,6 +1213,15 @@ export default function Home() {
     }, intervalMs)
   }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
 
+  // Restart playback interval when playbackSpeed changes while playing.
+  // startPlayback is intentionally omitted from deps to avoid a re-render loop;
+  // the latest version is captured via closure each time playbackSpeed changes.
+  useEffect(() => {
+    if (isPlaying) {
+      startPlayback()
+    }
+  }, [playbackSpeed]) // eslint-disable-line react-hooks/exhaustive-deps
+
 
   const togglePlayback = useCallback(() => {
     if (isPlaying) {
@@ -1089,9 +1262,12 @@ export default function Home() {
   // Sync video player with current frame
   useEffect(() => {
     if (isSyncMode && videoPlayerRef.current && videoMetadata && playerPositions.length > 0) {
-      const timeInSeconds = currentFrame / videoMetadata.fps
-      if (Math.abs(videoPlayerRef.current.currentTime - timeInSeconds) > 0.1) {
-        videoPlayerRef.current.currentTime = timeInSeconds
+      const video = videoPlayerRef.current
+      if (video.readyState >= 2) {  // HAVE_CURRENT_DATA or better
+        const timeInSeconds = currentFrame / videoMetadata.fps
+        if (Math.abs(video.currentTime - timeInSeconds) > 0.1) {
+          video.currentTime = timeInSeconds
+        }
       }
     }
   }, [currentFrame, isSyncMode, videoMetadata, playerPositions.length])
@@ -1132,6 +1308,7 @@ export default function Home() {
     setLoadingWarpedFrame(true)
     try {
       const url = `${API_URL}/videos/${videoMetadata.video_id}/warped-frame/${frameIdx}`
+      console.log(`Loading warped frame from: ${url}`)
       // Test if the endpoint exists first
       const response = await fetch(url)
       if (response.ok) {
@@ -1204,6 +1381,29 @@ export default function Home() {
   }, [currentFrame, playerPositions, drawPitch])
 
   const currentAnchor = anchorFrames[currentAnchorIdx]
+
+  // Coverage quality metrics for current anchor frame
+  const pointCount = currentAnchor ? currentAnchor.points.length : 0
+  const coverageColor = pointCount < 4 ? '#ff4444' : pointCount < 7 ? '#ffaa00' : '#44ff44'
+  let coveragePercent = 0
+  let clustered = false
+  if (currentAnchor && currentAnchor.points.length >= 2) {
+    const pitchCoords = currentAnchor.points.map(p => {
+      const vert = GAA_PITCH_VERTICES[p.pitch_id]
+      if (vert) return { x: vert[0], y: vert[1] }
+    const match = p.pitch_id.match(/x([-\d.]+)_y([-\d.]+)$/)
+      if (match) return { x: parseFloat(match[1]), y: parseFloat(match[2]) }
+      return null
+    }).filter(Boolean) as Array<{ x: number; y: number }>
+    if (pitchCoords.length >= 2) {
+      const xs = pitchCoords.map(c => c.x)
+      const ys = pitchCoords.map(c => c.y)
+      const bboxW = Math.max(...xs) - Math.min(...xs)
+      const bboxH = Math.max(...ys) - Math.min(...ys)
+      coveragePercent = Math.round(bboxW * bboxH / (GAA_PITCH_WIDTH * GAA_PITCH_LENGTH) * 100)
+      clustered = coveragePercent < 10
+    }
+  }
 
   return (
     <>
@@ -1351,6 +1551,13 @@ export default function Home() {
                   Frame {currentAnchor.frame_idx} |
                   Points: {currentAnchor.points.length}/4+ | Lines: {currentAnchor.lines?.length || 0}
                 </span>
+                {/* Coverage quality badge */}
+                <span style={{ marginLeft: 12, fontSize: 12 }}>
+                  <span style={{ color: coverageColor }}>●</span>{' '}
+                  {pointCount} points
+                  {currentAnchor.points.length >= 2 && ` | Coverage: ${coveragePercent}%`}
+                  {clustered && ' | ⚠ Clustered'}
+                </span>
                 <div className="anchor-actions">
                   <button
                     onClick={toggleSkipFrame}
@@ -1364,7 +1571,24 @@ export default function Home() {
                   }}>
                     Swap Frame
                   </button>
+                  <button
+                    onClick={() => copyFromAnchor(currentAnchorIdx - 1)}
+                    disabled={currentAnchorIdx === 0}
+                    title="Copy points and lines from previous anchor frame"
+                  >
+                    ← Copy Prev
+                  </button>
+                  <button
+                    onClick={() => copyFromAnchor(currentAnchorIdx + 1)}
+                    disabled={currentAnchorIdx === anchorFrames.length - 1}
+                    title="Copy points and lines from next anchor frame"
+                  >
+                    Copy Next →
+                  </button>
                 </div>
+                {copyStatus && (
+                  <span style={{ marginLeft: 8, fontSize: 12, color: '#44ff44' }}>{copyStatus}</span>
+                )}
               </div>
             )}
 
@@ -1485,16 +1709,22 @@ export default function Home() {
                   <div className="points-list">
                     <h4>Annotated Points ({currentAnchor.points.length}):</h4>
                     <div className="points-grid">
-                      {currentAnchor.points.map((point, idx) => (
-                        <div key={idx} className="point-item">
-                          <span>
-                            <strong>{getPointLabel(point.pitch_id)}</strong>
-                            <br/>
-                            <small>Frame: ({point.x_img}, {point.y_img})</small>
-                          </span>
-                          <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
-                        </div>
-                      ))}
+                      {currentAnchor.points.map((point, idx) => {
+                        const isLinePoint = point.pitch_id.startsWith('line_')
+                        return (
+                          <div key={idx} className="point-item">
+                            <span>
+                              <strong style={isLinePoint ? { color: '#88ccff' } : undefined}>
+                                {getPointLabel(point.pitch_id)}
+                                {isLinePoint && <em style={{ fontWeight: 'normal', fontSize: '0.85em' }}> (line)</em>}
+                              </strong>
+                              <br/>
+                              <small>Frame: ({point.x_img}, {point.y_img})</small>
+                            </span>
+                            <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
+                          </div>
+                        )
+                      })}
                     </div>
                   </div>
                 )}
@@ -1548,13 +1778,37 @@ export default function Home() {
                   {anchorFrames.filter(af => !af.isSkipped && af.points.length < 4).length} frames incomplete
                 </p>
               </div>
-              <button
-                onClick={processVideo}
-                disabled={processing || anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length === 0}
-                className="process-btn"
-              >
-                {processing ? 'Processing...' : 'Process Video'}
-              </button>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  onClick={processVideo}
+                  disabled={processing || anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length === 0}
+                  className="process-btn"
+                >
+                  {processing ? 'Processing...' : 'Process Video'}
+                </button>
+                <button onClick={exportAnnotations} title="Download annotations as JSON">
+                  Export Annotations
+                </button>
+                <button onClick={() => importFileRef.current?.click()} title="Load annotations from JSON file">
+                  Import Annotations
+                </button>
+                <input
+                  ref={importFileRef}
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (file) importAnnotations(file)
+                    e.target.value = ''
+                  }}
+                />
+              </div>
+              {importStatus && (
+                <p style={{ fontSize: 13, marginTop: 6, color: importStatus.startsWith('Failed') || importStatus.startsWith('Invalid') ? '#ff6666' : '#aaffaa' }}>
+                  {importStatus}
+                </p>
+              )}
             </div>
           </div>
         )}
