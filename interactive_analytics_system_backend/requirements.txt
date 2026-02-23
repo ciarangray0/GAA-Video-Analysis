@@ -2,6 +2,7 @@
 numpy>=1.24.0
 pandas>=2.0.0
 opencv-python-headless>=4.8.0  # Headless for server deployment
+scipy>=1.11.0  # Cubic spline interpolation and signal smoothing
 
 # API backend
 fastapi>=0.104.0
