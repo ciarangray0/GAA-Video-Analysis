@@ -146,6 +146,9 @@ export default function Home() {
   // Pitch canvas ref for the diagram
   const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
 
+  // Import annotations file input ref
+  const importAnnotationsRef = useRef<HTMLInputElement>(null)
+
   // Pending click state - when user clicks frame, we wait for pitch point selection
   const [pendingFrameClick, setPendingFrameClick] = useState<{ x: number; y: number } | null>(null)
 
@@ -288,6 +291,28 @@ export default function Home() {
     setAnchorFrames(frames)
     setCurrentAnchorIdx(0)
     if (frames.length > 0) {
+      // Check for saved annotations in localStorage
+      const savedKey = videoFile ? `gaa_annotations_${videoFile.name}` : null
+      if (savedKey) {
+        const saved = localStorage.getItem(savedKey)
+        if (saved) {
+          try {
+            const parsed: AnchorFrame[] = JSON.parse(saved)
+            if (confirm(`Found saved annotations for this video (${parsed.length} frames). Restore them?`)) {
+              // Merge saved points/lines into newly generated frames
+              const merged = frames.map(f => {
+                const match = parsed.find(p => p.frame_idx === f.frame_idx)
+                return match ? { ...f, isSkipped: match.isSkipped, points: match.points, lines: match.lines || [] } : f
+              })
+              setAnchorFrames(merged)
+              loadFrameImage(merged[0].frame_idx)
+              return
+            }
+          } catch (_) {
+            console.warn('Could not restore saved annotations - data may be corrupt')
+          }
+        }
+      }
       loadFrameImage(frames[0].frame_idx)
     }
   }
@@ -754,6 +779,105 @@ export default function Home() {
     loadFrameImage(newFrameIdx)
   }
 
+  // Export annotations to JSON file
+  const exportAnnotations = () => {
+    const filename = videoFile?.name || 'unknown'
+    const data = {
+      videoFilename: filename,
+      anchorFrames: anchorFrames.map(af => ({
+        frame_idx: af.frame_idx,
+        isSkipped: af.isSkipped,
+        points: af.points,
+        lines: af.lines || [],
+      })),
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `annotations_${filename}_${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Import annotations from JSON file
+  const importAnnotations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target?.result as string)
+        if (!parsed.anchorFrames || !Array.isArray(parsed.anchorFrames)) {
+          alert('Invalid annotation file format.')
+          return
+        }
+        const imported: AnchorFrame[] = parsed.anchorFrames.map((af: any) => ({
+          frame_idx: af.frame_idx,
+          isSkipped: !!af.isSkipped,
+          points: Array.isArray(af.points) ? af.points : [],
+          lines: Array.isArray(af.lines) ? af.lines : [],
+        }))
+        if (anchorFrames.length > 0) {
+          // Merge imported data into existing anchor frame slots
+          const frameIndices = new Set(anchorFrames.map(f => f.frame_idx))
+          const importedIndices = imported.map(f => f.frame_idx)
+          const hasMismatch = importedIndices.some(idx => !frameIndices.has(idx))
+          if (hasMismatch) {
+            if (!confirm('Some imported frame indices do not match current anchor frames. Import anyway (matching frames will be updated)?')) return
+          }
+          const merged = anchorFrames.map(f => {
+            const match = imported.find(p => p.frame_idx === f.frame_idx)
+            return match ? { ...f, isSkipped: match.isSkipped, points: match.points, lines: match.lines } : f
+          })
+          setAnchorFrames(merged)
+          if (merged.length > 0) loadFrameImage(merged[0].frame_idx)
+        } else {
+          setAnchorFrames(imported)
+          if (imported.length > 0) loadFrameImage(imported[0].frame_idx)
+        }
+        setCurrentAnchorIdx(0)
+      } catch (err: any) {
+        alert(`Failed to parse annotation file: ${err?.message || 'Invalid format'}`)
+      }
+    }
+    reader.readAsText(file)
+    // Reset input so same file can be re-imported
+    e.target.value = ''
+  }
+
+  // Copy points from previous non-skipped anchor frame
+  const copyFromPrevious = () => {
+    let srcIdx = currentAnchorIdx - 1
+    while (srcIdx >= 0 && anchorFrames[srcIdx].isSkipped) srcIdx--
+    if (srcIdx < 0 || anchorFrames[srcIdx].points.length === 0) return
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx] = {
+        ...updated[currentAnchorIdx],
+        points: [...anchorFrames[srcIdx].points],
+        lines: [...(anchorFrames[srcIdx].lines || [])],
+      }
+      return updated
+    })
+  }
+
+  // Copy points from next non-skipped anchor frame
+  const copyFromNext = () => {
+    let srcIdx = currentAnchorIdx + 1
+    while (srcIdx < anchorFrames.length && anchorFrames[srcIdx].isSkipped) srcIdx++
+    if (srcIdx >= anchorFrames.length || anchorFrames[srcIdx].points.length === 0) return
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx] = {
+        ...updated[currentAnchorIdx],
+        points: [...anchorFrames[srcIdx].points],
+        lines: [...(anchorFrames[srcIdx].lines || [])],
+      }
+      return updated
+    })
+  }
+
   // Process video with annotations
   const processVideo = async () => {
     if (!videoFile || !videoMetadata) {
@@ -1203,6 +1327,13 @@ export default function Home() {
     }
   }, [currentFrame, playerPositions, drawPitch])
 
+  // Auto-save annotations to localStorage whenever anchorFrames changes
+  useEffect(() => {
+    if (anchorFrames.length > 0 && videoFile) {
+      localStorage.setItem(`gaa_annotations_${videoFile.name}`, JSON.stringify(anchorFrames))
+    }
+  }, [anchorFrames, videoFile])
+
   const currentAnchor = anchorFrames[currentAnchorIdx]
 
   return (
@@ -1363,6 +1494,20 @@ export default function Home() {
                     if (newFrame) swapAnchorFrame(parseInt(newFrame))
                   }}>
                     Swap Frame
+                  </button>
+                  <button
+                    onClick={copyFromPrevious}
+                    disabled={currentAnchorIdx === 0 || !anchorFrames.slice(0, currentAnchorIdx).some(f => !f.isSkipped && f.points.length > 0)}
+                    title="Copy annotations from the previous non-skipped frame"
+                  >
+                    ← Copy Previous
+                  </button>
+                  <button
+                    onClick={copyFromNext}
+                    disabled={currentAnchorIdx === anchorFrames.length - 1 || !anchorFrames.slice(currentAnchorIdx + 1).some(f => !f.isSkipped && f.points.length > 0)}
+                    title="Copy annotations from the next non-skipped frame"
+                  >
+                    Copy Next →
                   </button>
                 </div>
               </div>
@@ -1547,6 +1692,21 @@ export default function Home() {
                   {anchorFrames.filter(af => af.isSkipped).length} frames skipped |{' '}
                   {anchorFrames.filter(af => !af.isSkipped && af.points.length < 4).length} frames incomplete
                 </p>
+              </div>
+              <div className="annotation-io-buttons">
+                <button onClick={exportAnnotations} className="secondary-btn">
+                  ⬇ Export Annotations
+                </button>
+                <button onClick={() => importAnnotationsRef.current?.click()} className="secondary-btn">
+                  ⬆ Import Annotations
+                </button>
+                <input
+                  ref={importAnnotationsRef}
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  onChange={importAnnotations}
+                />
               </div>
               <button
                 onClick={processVideo}
