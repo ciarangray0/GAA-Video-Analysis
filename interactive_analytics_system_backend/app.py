@@ -7,6 +7,8 @@ import json
 import numpy as np
 import logging
 
+import httpx
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -698,3 +700,46 @@ async def process_video(
             video_path.unlink()
         logger.error(f"Processing failed for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail="Processing failed. Please try again.")
+
+
+# --- Pull Requests ---
+GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER", "ciarangray0")
+GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME", "GAA-Video-Analysis")
+
+
+@app.get("/pull-requests")
+async def list_open_pull_requests():
+    """
+    List open pull requests for the repository from GitHub API.
+
+    Returns a list of open pull requests with number, title, url, created_at, and user.
+    """
+    github_token = os.getenv("GITHUB_TOKEN")
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/pulls?state=open&per_page=100"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+    except Exception as e:
+        logger.error(f"Failed to fetch pull requests: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch pull requests from GitHub")
+
+    if response.status_code != 200:
+        logger.error(f"GitHub API returned {response.status_code}: {response.text}")
+        raise HTTPException(status_code=502, detail="Failed to fetch pull requests from GitHub")
+
+    pulls = response.json()
+    return [
+        {
+            "number": pr["number"],
+            "title": pr["title"],
+            "url": pr["html_url"],
+            "created_at": pr["created_at"],
+            "user": pr["user"]["login"],
+        }
+        for pr in pulls
+    ]

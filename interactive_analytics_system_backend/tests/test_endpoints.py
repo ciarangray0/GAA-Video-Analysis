@@ -181,3 +181,65 @@ def test_process_video_with_trim_params(client, monkeypatch, sample_annotations,
     body = resp.json()
     assert body["status"] == "completed"
 
+
+
+def test_list_open_pull_requests(client, monkeypatch):
+    """Test /pull-requests returns a list of open PRs from the GitHub API."""
+    fake_prs = [
+        {
+            "number": 1,
+            "title": "Fix something",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "user": {"login": "alice"},
+        }
+    ]
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return fake_prs
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
+
+    resp = client.get("/pull-requests")
+    assert resp.status_code == 200
+    prs = resp.json()
+    assert len(prs) == 1
+    assert prs[0]["number"] == 1
+    assert prs[0]["title"] == "Fix something"
+    assert prs[0]["user"] == "alice"
+
+
+def test_list_open_pull_requests_github_error(client, monkeypatch):
+    """Test /pull-requests returns 502 when GitHub API fails."""
+
+    class FakeErrorResponse:
+        status_code = 403
+        text = "Forbidden"
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, headers):
+            return FakeErrorResponse()
+
+    monkeypatch.setattr("app.httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
+
+    resp = client.get("/pull-requests")
+    assert resp.status_code == 502

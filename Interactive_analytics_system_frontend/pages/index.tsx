@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
+import Link from 'next/link'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -1065,6 +1066,11 @@ export default function Home() {
       </Head>
       <div className="container">
         <h1>⚽ GAA Video Analysis System</h1>
+        <p style={{ marginBottom: '20px' }}>
+          <Link href="/pull-requests" style={{ color: '#0070f3', textDecoration: 'underline' }}>
+            View Open Pull Requests
+          </Link>
+        </p>
 
         {/* Step 1: Upload Video */}
         <div className="upload-section">
