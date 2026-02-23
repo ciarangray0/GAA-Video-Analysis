@@ -288,6 +288,28 @@ export default function Home() {
     setAnchorFrames(frames)
     setCurrentAnchorIdx(0)
     if (frames.length > 0) {
+      // Check localStorage for saved annotations
+      const savedKey = videoFile?.name ? `gaa_annotations_${videoFile.name}` : null
+      const saved = savedKey ? localStorage.getItem(savedKey) : null
+      if (saved) {
+        try {
+          const savedData = JSON.parse(saved)
+          if (savedData.anchorFrames && window.confirm('Saved annotations found for this video. Restore them?')) {
+            const updatedFrames = frames.map(frame => {
+              const savedFrame = savedData.anchorFrames.find((sf: any) => sf.frame_idx === frame.frame_idx)
+              if (savedFrame) {
+                return { ...frame, isSkipped: savedFrame.isSkipped ?? false, points: savedFrame.points || [] }
+              }
+              return frame
+            })
+            setAnchorFrames(updatedFrames)
+            loadFrameImage(updatedFrames[0].frame_idx)
+            return
+          }
+        } catch (err) {
+          // ignore corrupt saved data
+        }
+      }
       loadFrameImage(frames[0].frame_idx)
     }
   }
@@ -754,6 +776,96 @@ export default function Home() {
     loadFrameImage(newFrameIdx)
   }
 
+  // Export annotations to JSON file
+  const exportAnnotations = () => {
+    const data = {
+      anchorFrames: anchorFrames.map(af => ({
+        frame_idx: af.frame_idx,
+        isSkipped: af.isSkipped,
+        points: af.points.map(p => ({ pitch_id: p.pitch_id, x_img: p.x_img, y_img: p.y_img }))
+      }))
+    }
+    const json = JSON.stringify(data, null, 2)
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `annotations_${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Import annotations from JSON file
+  const importAnnotations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (evt) => {
+      try {
+        const data = JSON.parse(evt.target?.result as string)
+        if (!data.anchorFrames || !Array.isArray(data.anchorFrames)) {
+          setError('Invalid annotation file format')
+          return
+        }
+        const currentFrameIdxs = new Set(anchorFrames.map(af => af.frame_idx))
+        const hasMatches = data.anchorFrames.some((f: any) => currentFrameIdxs.has(f.frame_idx))
+        if (!hasMatches) {
+          setError('Warning: No matching frame indices found in annotation file. Points not imported.')
+          return
+        }
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          for (const importedFrame of data.anchorFrames) {
+            const idx = updated.findIndex(af => af.frame_idx === importedFrame.frame_idx)
+            if (idx >= 0) {
+              updated[idx] = {
+                ...updated[idx],
+                isSkipped: importedFrame.isSkipped ?? false,
+                points: importedFrame.points || []
+              }
+            }
+          }
+          return updated
+        })
+        e.target.value = ''
+        loadFrameImage(anchorFrames[currentAnchorIdx].frame_idx)
+      } catch (err) {
+        setError('Failed to parse annotation file')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  // Copy points from the nearest previous non-skipped frame that has points
+  const copyFromPrevious = () => {
+    for (let i = currentAnchorIdx - 1; i >= 0; i--) {
+      const frame = anchorFrames[i]
+      if (!frame.isSkipped && frame.points.length > 0) {
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          updated[currentAnchorIdx] = { ...updated[currentAnchorIdx], points: [...frame.points] }
+          return updated
+        })
+        return
+      }
+    }
+  }
+
+  // Copy points from the nearest next non-skipped frame that has points
+  const copyFromNext = () => {
+    for (let i = currentAnchorIdx + 1; i < anchorFrames.length; i++) {
+      const frame = anchorFrames[i]
+      if (!frame.isSkipped && frame.points.length > 0) {
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          updated[currentAnchorIdx] = { ...updated[currentAnchorIdx], points: [...frame.points] }
+          return updated
+        })
+        return
+      }
+    }
+  }
+
   // Process video with annotations
   const processVideo = async () => {
     if (!videoFile || !videoMetadata) {
@@ -1182,6 +1294,22 @@ export default function Home() {
     return anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4)
   }, [anchorFrames, homographyFrameIndices])
 
+  // Auto-save annotations to localStorage when anchorFrames change
+  useEffect(() => {
+    if (!videoFile || anchorFrames.length === 0) return
+    const hasPoints = anchorFrames.some(af => af.points.length > 0)
+    if (!hasPoints) return
+    const key = `gaa_annotations_${videoFile.name}`
+    const data = {
+      anchorFrames: anchorFrames.map(af => ({
+        frame_idx: af.frame_idx,
+        isSkipped: af.isSkipped,
+        points: af.points
+      }))
+    }
+    localStorage.setItem(key, JSON.stringify(data))
+  }, [anchorFrames, videoFile])
+
   // Redraw frame when annotations change or image loads
   useEffect(() => {
     if (!loadingFrame && frameImageRef.current && anchorFrames.length > 0) {
@@ -1363,6 +1491,20 @@ export default function Home() {
                     if (newFrame) swapAnchorFrame(parseInt(newFrame))
                   }}>
                     Swap Frame
+                  </button>
+                  <button
+                    onClick={copyFromPrevious}
+                    disabled={currentAnchorIdx === 0 || !anchorFrames.slice(0, currentAnchorIdx).some(af => !af.isSkipped && af.points.length > 0)}
+                    title="Copy points from the nearest previous annotated frame"
+                  >
+                    ← Copy Prev
+                  </button>
+                  <button
+                    onClick={copyFromNext}
+                    disabled={currentAnchorIdx === anchorFrames.length - 1 || !anchorFrames.slice(currentAnchorIdx + 1).some(af => !af.isSkipped && af.points.length > 0)}
+                    title="Copy points from the nearest next annotated frame"
+                  >
+                    Copy Next →
                   </button>
                 </div>
               </div>
@@ -1548,13 +1690,27 @@ export default function Home() {
                   {anchorFrames.filter(af => !af.isSkipped && af.points.length < 4).length} frames incomplete
                 </p>
               </div>
-              <button
-                onClick={processVideo}
-                disabled={processing || anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length === 0}
-                className="process-btn"
-              >
-                {processing ? 'Processing...' : 'Process Video'}
-              </button>
+              <div className="process-actions">
+                <button
+                  onClick={processVideo}
+                  disabled={processing || anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length === 0}
+                  className="process-btn"
+                >
+                  {processing ? 'Processing...' : 'Process Video'}
+                </button>
+                <button onClick={exportAnnotations} title="Export annotations to JSON file">
+                  ⬇ Export Annotations
+                </button>
+                <label className="import-label" title="Import annotations from JSON file">
+                  ⬆ Import Annotations
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={importAnnotations}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         )}
