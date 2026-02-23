@@ -118,12 +118,31 @@ export default function Home() {
   const [warpedFrameUrl, setWarpedFrameUrl] = useState<string | null>(null)
   const [loadingWarpedFrame, setLoadingWarpedFrame] = useState(false)
 
+  // Step pipeline state
+  const [stepAResult, setStepAResult] = useState<{ frames_processed: number; tracks: number; num_detections: number } | null>(null)
+  const [stepBResult, setStepBResult] = useState<{ frames: number[]; info: Record<string, any> } | null>(null)
+  const [stepCResult, setStepCResult] = useState<{ positions: PlayerPosition[]; total: number } | null>(null)
+  const [stepDResult, setStepDResult] = useState<{ frames_generated: number; method: string } | null>(null)
+  const [staleSteps, setStaleSteps] = useState<Set<string>>(new Set())
+  const [runningStep, setRunningStep] = useState<string | null>(null)
+  // Refs that mirror step completion status for use in effects without causing dep loops
+  const stepDoneRef = useRef({ B: false, C: false, D: false })
+
+  // Debug log
+  const debugLog = useRef<string[]>([])
+  const [debugLogEntries, setDebugLogEntries] = useState<string[]>([])
+  const [debugLogVisible, setDebugLogVisible] = useState(false)
+
+  // BotSort overlay
+  const [showBotSortOverlay, setShowBotSortOverlay] = useState(false)
+
   // Refs
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement>(null)
   const frameImageRef = useRef<HTMLImageElement | null>(null)
   const videoPlayerRef = useRef<HTMLVideoElement>(null)
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const animFrameRef = useRef<number>(0)
   const resultsFrameCanvasRef = useRef<HTMLCanvasElement>(null)
   const resultsFrameImageRef = useRef<HTMLImageElement | null>(null)
   const importFileRef = useRef<HTMLInputElement>(null)
@@ -257,7 +276,182 @@ export default function Home() {
     return id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
   }
 
-  // Upload video and get metadata
+  // Wrapped fetch that logs all API calls to the debug panel
+  const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
+    const method = options?.method || 'GET'
+    const entry1 = `→ ${method} ${url}`
+    debugLog.current = [...debugLog.current, entry1]
+    setDebugLogEntries([...debugLog.current])
+    const start = Date.now()
+    try {
+      const res = await fetch(url, options)
+      const elapsed = Date.now() - start
+      const entry2 = `← ${res.status} (${elapsed}ms)`
+      debugLog.current = [...debugLog.current, entry2]
+      setDebugLogEntries([...debugLog.current])
+      return res
+    } catch (err) {
+      const entry2 = `✗ ${String(err)}`
+      debugLog.current = [...debugLog.current, entry2]
+      setDebugLogEntries([...debugLog.current])
+      throw err
+    }
+  }, [])
+
+  // Mark downstream steps as stale
+  const markStale = useCallback((steps: string[]) => {
+    setStaleSteps(prev => {
+      const next = new Set(prev)
+      steps.forEach(s => next.add(s))
+      return next
+    })
+  }, [])
+
+  const clearStale = useCallback((steps: string[]) => {
+    setStaleSteps(prev => {
+      const next = new Set(prev)
+      steps.forEach(s => next.delete(s))
+      return next
+    })
+  }, [])
+
+  // Step A: Run tracking
+  const runStepA = useCallback(async () => {
+    if (!videoMetadata) { setError('Please upload a video first'); return }
+    setRunningStep('A')
+    setError('')
+    try {
+      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track`, { method: 'POST' })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Tracking failed')
+      }
+      const data = await res.json()
+      // Fetch detections to get total count
+      const detRes = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/detections`)
+      const numDetections = detRes.ok ? (await detRes.json() as any[]).length : 0
+      setStepAResult({ frames_processed: data.frames_processed, tracks: data.tracks, num_detections: numDetections })
+      markStale(['B', 'C', 'D'])
+      clearStale(['A'])
+    } catch (err: any) {
+      setError(err.message || 'Tracking failed')
+    } finally {
+      setRunningStep(null)
+    }
+  }, [videoMetadata, apiFetch, markStale, clearStale])
+
+  // Step B: Compute homographies
+  const runStepB = useCallback(async () => {
+    if (!videoMetadata) { setError('Please upload a video first'); return }
+    if (!stepAResult) { setError('Please run tracking first (Step A)'); return }
+
+    const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
+      .filter(af => !af.isSkipped && af.points.length >= 4)
+      .map(af => ({ frame_idx: af.frame_idx, points: af.points, lines: af.lines || [] }))
+
+    if (validAnnotations.length === 0) {
+      setError('Please annotate at least one anchor frame with 4+ points')
+      return
+    }
+
+    setRunningStep('B')
+    setError('')
+    try {
+      const hasLines = validAnnotations.some(a => a.lines.length > 0)
+      const endpoint = hasLines
+        ? `${API_URL}/videos/${videoMetadata.video_id}/homographies/v2`
+        : `${API_URL}/videos/${videoMetadata.video_id}/homographies`
+
+      const res = await apiFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hasLines ? validAnnotations : validAnnotations.map(a => ({ frame_idx: a.frame_idx, points: a.points })))
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Homography computation failed')
+      }
+      const data = await res.json()
+      setStepBResult({ frames: data.frames || [], info: data.info || {} })
+      setHomographyFrameIndices(data.frames || [])
+      markStale(['C', 'D'])
+      clearStale(['B'])
+    } catch (err: any) {
+      setError(err.message || 'Homography computation failed')
+    } finally {
+      setRunningStep(null)
+    }
+  }, [videoMetadata, stepAResult, anchorFrames, apiFetch, markStale, clearStale])
+
+  // Step C: Map players to pitch
+  const runStepC = useCallback(async () => {
+    if (!videoMetadata) { setError('Please upload a video first'); return }
+    if (!stepBResult) { setError('Please compute homographies first (Step B)'); return }
+
+    setRunningStep('C')
+    setError('')
+    try {
+      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/map_players`, { method: 'POST' })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Player mapping failed')
+      }
+      const positions: PlayerPosition[] = await res.json()
+      setStepCResult({ positions, total: positions.length })
+      markStale(['D'])
+      clearStale(['C'])
+    } catch (err: any) {
+      setError(err.message || 'Player mapping failed')
+    } finally {
+      setRunningStep(null)
+    }
+  }, [videoMetadata, stepBResult, apiFetch, markStale, clearStale])
+
+  // Step D: Interpolate trajectories
+  const runStepD = useCallback(async () => {
+    if (!videoMetadata) { setError('Please upload a video first'); return }
+    if (!stepCResult) { setError('Please map players first (Step C)'); return }
+
+    const startFrame = Math.floor(trimStartSeconds * videoMetadata.fps)
+    const endFrame = trimEndSeconds !== null
+      ? Math.floor(trimEndSeconds * videoMetadata.fps)
+      : videoMetadata.num_frames - 1
+
+    setRunningStep('D')
+    setError('')
+    try {
+      const res = await apiFetch(
+        `${API_URL}/videos/${videoMetadata.video_id}/interpolate?start_frame=${startFrame}&end_frame=${endFrame}`,
+        { method: 'POST' }
+      )
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Interpolation failed')
+      }
+      const data = await res.json()
+      setStepDResult({ frames_generated: data.frames_generated, method: data.method })
+      clearStale(['D'])
+
+      // Fetch all player positions and activate results view
+      const playersRes = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/players`)
+      if (playersRes.ok) {
+        const allPositions: PlayerPosition[] = await playersRes.json()
+        setPlayerPositions(allPositions)
+        setProcessedStartFrame(startFrame)
+        setProcessedEndFrame(endFrame)
+        setProcessedFps(videoMetadata.fps)
+        const firstFrame = allPositions.length > 0
+          ? Math.min(...allPositions.map(p => p.frame_idx))
+          : startFrame
+        setCurrentFrame(firstFrame)
+        setStatus('Pipeline complete!')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Interpolation failed')
+    } finally {
+      setRunningStep(null)
+    }
+  }, [videoMetadata, stepCResult, trimStartSeconds, trimEndSeconds, apiFetch, clearStale])
   const uploadVideo = async () => {
     if (!videoFile) return
 
@@ -415,34 +609,36 @@ export default function Home() {
         const x2 = line.u2 * imgScale
         const y2 = line.v2 * imgScale
 
-        // Draw dashed line
-        ctx.strokeStyle = '#00ffff'
-        ctx.lineWidth = 3
-        ctx.setLineDash([10, 5])
+        // Draw dashed line (more subtle)
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([6, 4])
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.lineTo(x2, y2)
         ctx.stroke()
         ctx.setLineDash([])
 
-        // Draw endpoints
-        ctx.fillStyle = '#00ffff'
+        // Draw endpoints (smaller)
+        ctx.fillStyle = 'rgba(0, 255, 255, 0.6)'
         ctx.beginPath()
-        ctx.arc(x1, y1, 6, 0, 2 * Math.PI)
+        ctx.arc(x1, y1, 4, 0, 2 * Math.PI)
         ctx.fill()
         ctx.beginPath()
-        ctx.arc(x2, y2, 6, 0, 2 * Math.PI)
+        ctx.arc(x2, y2, 4, 0, 2 * Math.PI)
         ctx.fill()
 
-        // Draw label at midpoint
+        // Draw label at midpoint with subtle background
         const midX = (x1 + x2) / 2
         const midY = (y1 + y2) / 2
-        ctx.fillStyle = '#000000'
-        ctx.fillRect(midX - 40, midY - 10, 80, 20)
+        ctx.font = '9px Arial'
+        const labelText = AVAILABLE_LINES[line.line_id]?.label || line.line_id
+        const textW = ctx.measureText(labelText).width
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)'
+        ctx.fillRect(midX - textW / 2 - 3, midY - 8, textW + 6, 14)
         ctx.fillStyle = '#00ffff'
-        ctx.font = 'bold 11px Arial'
         ctx.textAlign = 'center'
-        ctx.fillText(AVAILABLE_LINES[line.line_id]?.label || line.line_id, midX, midY + 4)
+        ctx.fillText(labelText, midX, midY + 3)
         ctx.textAlign = 'left'
       })
     }
@@ -452,22 +648,22 @@ export default function Home() {
       const x = pendingLinePoint1.x * imgScale
       const y = pendingLinePoint1.y * imgScale
 
-      // Draw pulsing point
-      ctx.fillStyle = '#ffff00'
+      // Draw subtle pending marker
+      ctx.fillStyle = 'rgba(255, 255, 0, 0.7)'
       ctx.beginPath()
-      ctx.arc(x, y, 10, 0, 2 * Math.PI)
+      ctx.arc(x, y, 6, 0, 2 * Math.PI)
       ctx.fill()
       ctx.strokeStyle = '#000000'
-      ctx.lineWidth = 2
+      ctx.lineWidth = 1
       ctx.stroke()
 
-      // Draw instruction
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
-      ctx.fillRect(x - 80, y + 15, 160, 25)
+      // Draw instruction (smaller, more transparent)
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+      ctx.fillRect(x - 75, y + 12, 150, 20)
       ctx.fillStyle = '#ffffff'
-      ctx.font = 'bold 12px Arial'
+      ctx.font = '10px Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('Click second point on line', x, y + 32)
+      ctx.fillText('Click second point on line', x, y + 26)
       ctx.textAlign = 'left'
     }
 
@@ -477,21 +673,27 @@ export default function Home() {
         const x = point.x_img * imgScale
         const y = point.y_img * imgScale
 
-        // Draw point
-        ctx.fillStyle = '#ff0000'
+        // Draw point (smaller, semi-transparent green)
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.6)'
         ctx.beginPath()
-        ctx.arc(x, y, 8, 0, 2 * Math.PI)
+        ctx.arc(x, y, 5, 0, 2 * Math.PI)
         ctx.fill()
 
-        // Draw border
+        // Draw border (thinner)
         ctx.strokeStyle = '#ffffff'
-        ctx.lineWidth = 2
+        ctx.lineWidth = 1
         ctx.stroke()
 
-        // Draw label
+        // Draw label with dark background
+        ctx.font = '10px Arial'
+        const labelText = point.pitch_id
+        const textW = ctx.measureText(labelText).width
+        const lx = x + 14
+        const ly = y + 4
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'
+        ctx.fillRect(lx - 2, ly - 10, textW + 4, 13)
         ctx.fillStyle = '#ffffff'
-        ctx.font = 'bold 12px Arial'
-        ctx.fillText(point.pitch_id, x + 12, y + 4)
+        ctx.fillText(labelText, lx, ly)
       })
     }
   }, [anchorFrames, currentAnchorIdx, pendingLinePoint1, AVAILABLE_LINES])
@@ -806,15 +1008,14 @@ export default function Home() {
       ctx.stroke()
     }
 
-    // If there's a pending click, show instruction
+    // If there's a pending click, show instruction (smaller, more subtle)
     if (pendingFrameClick) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 50, PITCH_DISPLAY_WIDTH - 20, 40)
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 44, PITCH_DISPLAY_WIDTH - 20, 34)
       ctx.fillStyle = '#ffffff'
-      ctx.font = 'bold 12px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText('Click a vertex (●) or anywhere on a line', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 30)
       ctx.font = '10px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText('Click a vertex (●) or anywhere on a line', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 28)
       ctx.fillStyle = '#aaaaaa'
       ctx.fillText(`Frame: (${pendingFrameClick.x}, ${pendingFrameClick.y})`, PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 14)
       ctx.textAlign = 'left'
@@ -1224,56 +1425,58 @@ export default function Home() {
     img.src = `${url}?t=${Date.now()}`
   }, [videoMetadata])
 
-  // Playback controls
+  // Playback controls (requestAnimationFrame-based for smooth playback)
   const stopPlayback = useCallback(() => {
-    if (playbackIntervalRef.current) {
-      clearInterval(playbackIntervalRef.current)
-      playbackIntervalRef.current = null
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current)
+      animFrameRef.current = 0
+    }
+    if (videoPlayerRef.current) {
+      videoPlayerRef.current.pause()
     }
     setIsPlaying(false)
   }, [])
 
-  const startPlayback = useCallback(() => {
-    if (playbackIntervalRef.current) {
-      clearInterval(playbackIntervalRef.current)
+  const onPlaybackFrame = useCallback(() => {
+    const video = videoPlayerRef.current
+    if (!video || video.paused) {
+      setIsPlaying(false)
+      return
     }
+    const fps = processedFps || videoMetadata?.fps || 25
+    const frameIdx = Math.round(video.currentTime * fps)
+    // Stop at trim end
+    if (frameIdx > processedEndFrame) {
+      video.pause()
+      setIsPlaying(false)
+      return
+    }
+    setCurrentFrame(frameIdx)
+    animFrameRef.current = requestAnimationFrame(onPlaybackFrame)
+  }, [processedFps, processedEndFrame, videoMetadata])
 
-    const framesWithPositions = getFramesWithPositions()
-    if (framesWithPositions.length === 0) return
+  const startPlayback = useCallback(() => {
+    const video = videoPlayerRef.current
+    if (!video || playerPositions.length === 0) return
 
     setIsPlaying(true)
-
+    video.playbackRate = playbackSpeed
+    // Seek to trim start if not already there
     const fps = processedFps || videoMetadata?.fps || 25
-    const intervalMs = (1000 / fps) / playbackSpeed
-
-    playbackIntervalRef.current = setInterval(() => {
-      setCurrentFrame(prev => {
-        const currentIdx = framesWithPositions.indexOf(prev)
-        const nextIdx = currentIdx + 1
-
-        if (nextIdx >= framesWithPositions.length) {
-          // Stop at end
-          stopPlayback()
-          return prev
-        }
-
-        return framesWithPositions[nextIdx]
-      })
-    }, intervalMs)
-  }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
-
-  // Restart playback interval when playbackSpeed changes while playing.
-  // `startPlayback` is wrapped with useCallback and already re-creates the
-  // interval using the latest `playbackSpeed` from its closure.  Including it
-  // in the dep array would cause an infinite restart loop because every speed
-  // change updates `startPlayback`, which would then fire this effect again.
-  // The eslint-disable is intentional and safe here.
-  useEffect(() => {
-    if (isPlaying) {
-      startPlayback()
+    const startTime = processedStartFrame / fps
+    if (video.currentTime < startTime) {
+      video.currentTime = startTime
     }
-  }, [playbackSpeed]) // eslint-disable-line react-hooks/exhaustive-deps
+    video.play().catch((err) => { console.warn('Autoplay blocked by browser:', err) })
+    animFrameRef.current = requestAnimationFrame(onPlaybackFrame)
+  }, [playbackSpeed, playerPositions.length, processedFps, processedStartFrame, videoMetadata, onPlaybackFrame])
 
+  // Update playback rate when speed changes while playing
+  useEffect(() => {
+    if (isPlaying && videoPlayerRef.current) {
+      videoPlayerRef.current.playbackRate = playbackSpeed
+    }
+  }, [playbackSpeed, isPlaying])
 
   const togglePlayback = useCallback(() => {
     if (isPlaying) {
@@ -1300,7 +1503,11 @@ export default function Home() {
     }
 
     setCurrentFrame(nearest)
-  }, [getFramesWithPositions])
+    // Seek video to this frame when not playing
+    if (!isPlaying && videoPlayerRef.current && videoMetadata) {
+      videoPlayerRef.current.currentTime = nearest / videoMetadata.fps
+    }
+  }, [getFramesWithPositions, isPlaying, videoMetadata])
 
   const skipFrames = useCallback((delta: number) => {
     const framesWithPositions = getFramesWithPositions()
@@ -1311,18 +1518,18 @@ export default function Home() {
     setCurrentFrame(framesWithPositions[newIdx])
   }, [currentFrame, getFramesWithPositions])
 
-  // Sync video player with current frame
+  // Sync video player with current frame when not in rAF playback
   useEffect(() => {
-    if (isSyncMode && videoPlayerRef.current && videoMetadata && playerPositions.length > 0) {
+    if (!isPlaying && isSyncMode && videoPlayerRef.current && videoMetadata && playerPositions.length > 0) {
       const video = videoPlayerRef.current
-      if (video.readyState >= 2) {  // HAVE_CURRENT_DATA or better
+      if (video.readyState >= 2) {
         const timeInSeconds = currentFrame / videoMetadata.fps
         if (Math.abs(video.currentTime - timeInSeconds) > 0.1) {
           video.currentTime = timeInSeconds
         }
       }
     }
-  }, [currentFrame, isSyncMode, videoMetadata, playerPositions.length])
+  }, [currentFrame, isPlaying, isSyncMode, videoMetadata, playerPositions.length])
 
   // Load results frame when current frame changes
   useEffect(() => {
@@ -1334,8 +1541,8 @@ export default function Home() {
   // Cleanup playback on unmount
   useEffect(() => {
     return () => {
-      if (playbackIntervalRef.current) {
-        clearInterval(playbackIntervalRef.current)
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current)
       }
     }
   }, [])
@@ -1432,10 +1639,26 @@ export default function Home() {
     }
   }, [currentFrame, playerPositions, drawPitch])
 
+  // Keep stepDoneRef in sync so the annotation stale effect can read it without deps
+  useEffect(() => { stepDoneRef.current.B = stepBResult !== null }, [stepBResult])
+  useEffect(() => { stepDoneRef.current.C = stepCResult !== null }, [stepCResult])
+  useEffect(() => { stepDoneRef.current.D = stepDResult !== null }, [stepDResult])
+
   // Auto-save annotations to localStorage whenever anchorFrames changes
   useEffect(() => {
     if (anchorFrames.length > 0 && videoFile) {
       localStorage.setItem(`gaa_annotations_${videoFile.name}`, JSON.stringify(anchorFrames))
+    }
+    // Mark downstream pipeline steps stale when annotations change
+    const { B, C, D } = stepDoneRef.current
+    if (B || C || D) {
+      setStaleSteps(prev => {
+        const next = new Set(prev)
+        if (B) next.add('B')
+        if (C) next.add('C')
+        if (D) next.add('D')
+        return next
+      })
     }
   }, [anchorFrames, videoFile])
 
@@ -1827,7 +2050,7 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Process button */}
+            {/* Pipeline steps */}
             <div className="process-section">
               <div className="annotation-summary">
                 <p>
@@ -1852,13 +2075,169 @@ export default function Home() {
                   onChange={importAnnotations}
                 />
               </div>
-              <button
-                onClick={processVideo}
-                disabled={processing || anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length === 0}
-                className="process-btn"
-              >
-                {processing ? 'Processing...' : 'Process Video'}
-              </button>
+
+              {/* Step A */}
+              <div className="pipeline-step">
+                <div className="step-header">
+                  <h4>Step A: Upload &amp; Run Tracking</h4>
+                  {staleSteps.has('A') && <span className="stale-badge">STALE</span>}
+                </div>
+                <button
+                  onClick={runStepA}
+                  disabled={!videoMetadata || runningStep !== null}
+                  className="process-btn"
+                >
+                  {runningStep === 'A' ? 'Running...' : 'Upload & Run Tracking'}
+                </button>
+                {stepAResult && (
+                  <div className="step-result">
+                    <p>✅ Tracking complete</p>
+                    <p><strong>video_id:</strong> {videoMetadata?.video_id}</p>
+                    <p><strong>fps:</strong> {videoMetadata?.fps} | <strong>frames:</strong> {videoMetadata?.num_frames}</p>
+                    <p><strong>Detections:</strong> {stepAResult.num_detections} | <strong>Unique tracks:</strong> {stepAResult.tracks}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Step B */}
+              <div className="pipeline-step">
+                <div className="step-header">
+                  <h4>Step B: Compute Homographies</h4>
+                  {staleSteps.has('B') && <span className="stale-badge">STALE</span>}
+                </div>
+                <button
+                  onClick={runStepB}
+                  disabled={!stepAResult || runningStep !== null}
+                  className="process-btn"
+                >
+                  {runningStep === 'B' ? 'Computing...' : 'Compute Homographies'}
+                </button>
+                {stepBResult && (
+                  <div className="step-result">
+                    <p>✅ Homographies computed for {stepBResult.frames.length} frames</p>
+                    <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
+                    {Object.keys(stepBResult.info).length > 0 && (
+                      <details className="step-details">
+                        <summary>Computation Info</summary>
+                        <table className="debug-table">
+                          <thead>
+                            <tr><th>Frame</th><th>Keypoints</th><th>Lines</th><th>Converged</th><th>Warnings</th></tr>
+                          </thead>
+                          <tbody>
+                            {stepBResult.frames.map(f => {
+                              const info = stepBResult.info[String(f)] || {}
+                              return (
+                                <tr key={f}>
+                                  <td>{f}</td>
+                                  <td>{info.num_keypoints ?? '—'}</td>
+                                  <td>{info.valid_lines ?? 0}</td>
+                                  <td>{info.converged !== undefined ? (info.converged ? '✅' : '❌') : '—'}</td>
+                                  <td>{info.warnings ? info.warnings.join('; ') : '—'}</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </details>
+                    )}
+                    {/* Warped frame thumbnails */}
+                    <div className="warped-thumbs">
+                      {stepBResult.frames.map(f => (
+                        <div key={f} className="warped-thumb-item">
+                          <p className="thumb-label">Frame {f}</p>
+                          <div className="thumb-row">
+                            <div>
+                              <p className="thumb-sublabel">Original</p>
+                              <img
+                                src={`${API_URL}/videos/${videoMetadata?.video_id}/frame/${f}`}
+                                alt={`Original frame ${f}`}
+                                className="thumb-img"
+                              />
+                            </div>
+                            <div>
+                              <p className="thumb-sublabel">Warped</p>
+                              <img
+                                src={`${API_URL}/videos/${videoMetadata?.video_id}/frames/${f}/warped`}
+                                alt={`Warped frame ${f}`}
+                                className="thumb-img"
+                              />
+                            </div>
+                            {stepCResult && (
+                              <div>
+                                <p className="thumb-sublabel">With Players</p>
+                                <img
+                                  src={`${API_URL}/videos/${videoMetadata?.video_id}/frames/${f}/warped_with_players`}
+                                  alt={`Warped with players frame ${f}`}
+                                  className="thumb-img"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Step C */}
+              <div className="pipeline-step">
+                <div className="step-header">
+                  <h4>Step C: Map Players to Pitch</h4>
+                  {staleSteps.has('C') && <span className="stale-badge">STALE</span>}
+                </div>
+                <button
+                  onClick={runStepC}
+                  disabled={!stepBResult || runningStep !== null}
+                  className="process-btn"
+                >
+                  {runningStep === 'C' ? 'Mapping...' : 'Map Players'}
+                </button>
+                {stepCResult && (
+                  <div className="step-result">
+                    <p>✅ Mapped {stepCResult.total} player positions</p>
+                    <details className="step-details">
+                      <summary>Sample positions (first 20)</summary>
+                      <table className="debug-table">
+                        <thead>
+                          <tr><th>frame_idx</th><th>track_id</th><th>x_pitch</th><th>y_pitch</th></tr>
+                        </thead>
+                        <tbody>
+                          {stepCResult.positions.slice(0, 20).map((p, i) => (
+                            <tr key={i}>
+                              <td>{p.frame_idx}</td>
+                              <td>#{p.track_id}</td>
+                              <td>{p.x_pitch.toFixed(1)}</td>
+                              <td>{p.y_pitch.toFixed(1)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  </div>
+                )}
+              </div>
+
+              {/* Step D */}
+              <div className="pipeline-step">
+                <div className="step-header">
+                  <h4>Step D: Interpolate Trajectories</h4>
+                  {staleSteps.has('D') && <span className="stale-badge">STALE</span>}
+                </div>
+                <button
+                  onClick={runStepD}
+                  disabled={!stepCResult || runningStep !== null}
+                  className="process-btn"
+                >
+                  {runningStep === 'D' ? 'Interpolating...' : 'Interpolate'}
+                </button>
+                {stepDResult && (
+                  <div className="step-result">
+                    <p>✅ Interpolated {stepDResult.frames_generated} frames (method: {stepDResult.method})</p>
+                    <p>Results playback is now active below ↓</p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1930,6 +2309,16 @@ export default function Home() {
                 >
                   📐 Homography Info
                 </button>
+
+                <button
+                  onClick={() => setShowBotSortOverlay(!showBotSortOverlay)}
+                  className={`sidebar-toggle ${showBotSortOverlay ? 'active' : ''}`}
+                >
+                  🎯 BotSort Overlay
+                </button>
+                {showBotSortOverlay && (
+                  <span className="botsort-placeholder">BotSort overlay: coming soon</span>
+                )}
               </div>
             </div>
 
@@ -2179,6 +2568,44 @@ export default function Home() {
             </div>
           </div>
         )}
+
+        {/* Debug Log Panel (Task 5) */}
+        <div className="debug-log-panel">
+          <div className="debug-log-header" onClick={() => setDebugLogVisible(v => !v)}>
+            <h3>🐛 Debug Log {debugLogEntries.length > 0 && `(${debugLogEntries.length} entries)`}</h3>
+            <div className="debug-log-controls">
+              <span className="debug-toggle-hint">{debugLogVisible ? '▲ Collapse' : '▼ Expand'}</span>
+              <button
+                className="secondary-btn"
+                onClick={(e) => { e.stopPropagation(); debugLog.current = []; setDebugLogEntries([]) }}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          {debugLogVisible && (
+            <div className="debug-log-content">
+              <div className="debug-pipeline-state">
+                <strong>Pipeline state:</strong>{' '}
+                video_id: {videoMetadata?.video_id || '—'} |{' '}
+                detections: {stepAResult ? stepAResult.num_detections : '—'} |{' '}
+                homographies: {stepBResult ? stepBResult.frames.length : '—'} |{' '}
+                positions: {stepCResult ? stepCResult.total : '—'} |{' '}
+                interpolated frames: {stepDResult ? stepDResult.frames_generated : '—'}
+              </div>
+              <div className="debug-log-entries">
+                {debugLogEntries.length === 0
+                  ? <span className="debug-empty">No API calls logged yet.</span>
+                  : debugLogEntries.map((entry, i) => (
+                    <div key={i} className={`debug-log-entry ${entry.startsWith('←') ? 'response' : entry.startsWith('✗') ? 'error-entry' : 'request'}`}>
+                      {entry}
+                    </div>
+                  ))
+                }
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </>
   )
