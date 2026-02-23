@@ -62,7 +62,11 @@ GAA_PITCH_VERTICES = {
     "left_65m_line_bottom": (0.0, GAA_PITCH_LENGTH - 65.0),
     "left_65m_line_top": (0.0, 65.0),
     "right_65m_line_bottom": (85.0, GAA_PITCH_LENGTH - 65.0),
-    "right_65m_line_top": (85.0, 65.0)
+    "right_65m_line_top": (85.0, 65.0),
+
+    # Center line (halfway)
+    "center_left": (0.0, 70.0),
+    "center_right": (85.0, 70.0),
 }
 
 # =============================================================================
