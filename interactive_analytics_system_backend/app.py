@@ -353,6 +353,134 @@ def distorted_homography_warp(img, H, out_w, out_h, k1):
     return warped
 
 
+def find_nearest_homography(video_id: str, frame_idx: int):
+    """Return (H_matrix, anchor_frame_idx) for the nearest computed anchor frame."""
+    homographies = homographies_cache.get(video_id)
+    if not homographies:
+        homographies = load_homographies(video_id)
+    if not homographies:
+        return None, None
+    nearest = min(homographies.keys(), key=lambda f: abs(f - frame_idx))
+    return homographies[nearest], nearest
+
+
+@app.get("/videos/{video_id}/frames/{frame_idx}/warped")
+async def get_warped_frame_any(video_id: str, frame_idx: int):
+    """
+    Return a warped JPEG for any frame using the nearest anchor homography.
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    H, _nearest = find_nearest_homography(video_id, frame_idx)
+    if H is None:
+        raise HTTPException(status_code=400, detail="No homographies computed for this video")
+
+    video_info = videos[video_id]
+    try:
+        import cv2
+        from pipeline.config import OUT_W, OUT_H, K1
+
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        return Response(
+            content=buffer.tobytes(),
+            media_type="image/jpeg",
+            headers={"Cache-Control": "max-age=300"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed warped frame {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
+
+
+@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_players")
+async def get_warped_frame_with_players(video_id: str, frame_idx: int):
+    """
+    Return a warped JPEG with player positions drawn as coloured circles.
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    H, _nearest = find_nearest_homography(video_id, frame_idx)
+    if H is None:
+        raise HTTPException(status_code=400, detail="No homographies computed for this video")
+
+    video_info = videos[video_id]
+    try:
+        import cv2
+        from pipeline.config import OUT_W, OUT_H, K1
+
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+
+        # Draw player positions for this frame
+        positions = player_positions_cache.get(video_id, [])
+        frame_positions = [p for p in positions if p.frame_idx == frame_idx]
+
+        for pos in frame_positions:
+            x = int(pos.x_pitch)
+            y = int(pos.y_pitch)
+            if 0 <= x < OUT_W and 0 <= y < OUT_H:
+                color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
+                cv2.circle(warped, (x, y), 8, color, -1)
+                cv2.putText(
+                    warped, str(pos.track_id),
+                    (x + 10, y + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1
+                )
+
+        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        return Response(
+            content=buffer.tobytes(),
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-cache"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed warped_with_players {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
+
+
+@app.get("/videos/{video_id}/detections", response_model=List[Detection])
+async def get_video_detections(video_id: str):
+    """
+    Return the raw YOLO+BotSort detections for a video.
+    """
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    detections = detections_cache.get(video_id)
+    if detections is None:
+        detections = load_detections(video_id)
+    if detections is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No detections found. Run tracking first."
+        )
+    return detections
+
+
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
 async def track_video(video_id: str):
     """
