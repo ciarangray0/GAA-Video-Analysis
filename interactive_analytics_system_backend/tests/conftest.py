@@ -19,7 +19,7 @@ if "ultralytics" not in sys.modules:
     ultralytics_stub.YOLO = YOLO
     sys.modules["ultralytics"] = ultralytics_stub
 
-from pipeline.schemas import Detection, PitchAnnotation, PitchPoint, PlayerPitchPosition
+from pipeline.schemas import Detection, PitchAnnotation, PitchPoint, PlayerPitchPosition, LineAnnotation, AnchorFrameAnnotation
 from app import app, VIDEOS_DIR, TRACKS_DIR, ANNOTATIONS_DIR
 
 
@@ -147,6 +147,57 @@ def reset_gpu_client():
     gpu_inference._gpu_client = None
     yield
     gpu_inference._gpu_client = None
+
+
+@pytest.fixture
+def sample_line_annotations():
+    """Sample line annotations for testing line-constrained homography."""
+    return [
+        LineAnnotation(
+            line_id="20m_top",
+            u1=50.0, v1=200.0,
+            u2=350.0, v2=200.0
+        ),
+        LineAnnotation(
+            line_id="45m_top",
+            u1=40.0, v1=450.0,
+            u2=360.0, v2=450.0
+        )
+    ]
+
+
+@pytest.fixture
+def sample_anchor_frame_annotations(sample_line_annotations):
+    """Sample anchor frame annotations with both keypoints and lines."""
+    return [
+        AnchorFrameAnnotation(
+            frame_idx=0,
+            points=[
+                PitchPoint(pitch_id="corner_tl", x_img=0, y_img=0),
+                PitchPoint(pitch_id="corner_tr", x_img=400, y_img=0),
+                PitchPoint(pitch_id="corner_bl", x_img=0, y_img=800),
+                PitchPoint(pitch_id="corner_br", x_img=400, y_img=800),
+            ],
+            lines=sample_line_annotations
+        )
+    ]
+
+
+@pytest.fixture
+def sample_anchor_frame_annotations_no_lines():
+    """Sample anchor frame annotations without line constraints."""
+    return [
+        AnchorFrameAnnotation(
+            frame_idx=0,
+            points=[
+                PitchPoint(pitch_id="corner_tl", x_img=0, y_img=0),
+                PitchPoint(pitch_id="corner_tr", x_img=400, y_img=0),
+                PitchPoint(pitch_id="corner_bl", x_img=0, y_img=800),
+                PitchPoint(pitch_id="corner_br", x_img=400, y_img=800),
+            ],
+            lines=[]
+        )
+    ]
 
 
 @pytest.fixture

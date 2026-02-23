@@ -16,6 +16,45 @@ class PitchAnnotation(BaseModel):
     points: List[PitchPoint]
 
 
+class LineAnnotation(BaseModel):
+    """A pitch line annotation defined by two points.
+
+    Used to provide additional constraints for homography computation
+    in regions where point intersections are not visible (e.g., midfield).
+
+    The user clicks two points on a known horizontal pitch line, and the
+    system uses the known Y-value of that line to generate synthetic
+    point correspondences.
+
+    Attributes:
+        line_id: Identifier for the line (e.g., "20m_top", "halfway", "65m_bottom").
+                 Must match a key in GAA_PITCH_LINES.
+        u1, v1: First point on the line in image pixel coordinates.
+        u2, v2: Second point on the line in image pixel coordinates.
+    """
+    line_id: str
+    u1: float
+    v1: float
+    u2: float
+    v2: float
+
+
+class AnchorFrameAnnotation(BaseModel):
+    """Complete annotation for a single anchor frame.
+
+    Supports both traditional keypoint annotations and line annotations
+    for improved homography stability.
+
+    Attributes:
+        frame_idx: Frame index in the video.
+        points: List of point keypoint annotations (corners, goal posts, etc.).
+        lines: Optional list of line annotations for additional constraints.
+    """
+    frame_idx: int
+    points: List[PitchPoint]
+    lines: List[LineAnnotation] = []
+
+
 class Detection(BaseModel):
     """Player detection from YOLO + ByteTrack."""
     frame_idx: int

@@ -76,9 +76,14 @@ class YOLOTracker:
         # Set cache directory
         os.environ["YOLO_CONFIG_DIR"] = "/model_cache"
 
-        # Load YOLOv8n model (will download on first run, then cached)
-        self.model = YOLO("yolov8n.pt")
-        print("YOLO model loaded successfully")
+        model_path = "/model_cache/v8s_960_v9.pt"
+
+        if os.path.exists(model_path):
+            self.model = YOLO(model_path)
+            print(f"Loaded custom model from {model_path}")
+        else:
+            raise FileNotFoundError(
+                f"Model not found at {model_path}. Upload with: modal volume put yolo-model-cache v8s_960_v9.pt /v8s_960_v9.pt")
 
     def _run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
         """
@@ -102,11 +107,10 @@ class YOLOTracker:
             # Run tracking
             results = self.model.track(
                 source=temp_path,
-                tracker="bytetrack.yaml",
+                tracker="botsort.yaml",
+                imgsz=960,
                 persist=True,
-                conf=0.3,
-                iou=0.5,
-                classes=[0],  # Only detect people (class 0 in COCO)
+                conf=0.35,
                 verbose=False,
                 stream=True,  # Stream results to reduce memory
             )

@@ -9,9 +9,23 @@ interface PitchPoint {
   y_img: number
 }
 
+interface LineAnnotation {
+  line_id: string
+  u1: number
+  v1: number
+  u2: number
+  v2: number
+}
+
 interface PitchAnnotation {
   frame_idx: number
   points: PitchPoint[]
+}
+
+interface AnchorFrameAnnotation {
+  frame_idx: number
+  points: PitchPoint[]
+  lines: LineAnnotation[]
 }
 
 interface PlayerPosition {
@@ -45,6 +59,7 @@ interface AnchorFrame {
   frame_idx: number
   isSkipped: boolean
   points: PitchPoint[]
+  lines: LineAnnotation[]
 }
 
 export default function Home() {
@@ -63,6 +78,24 @@ export default function Home() {
   const [currentAnchorIdx, setCurrentAnchorIdx] = useState(0)
   const [frameImageUrl, setFrameImageUrl] = useState<string | null>(null)
   const [loadingFrame, setLoadingFrame] = useState(false)
+
+  // Line annotation state
+  const [annotationMode, setAnnotationMode] = useState<'point' | 'line'>('point')
+  const [selectedLineId, setSelectedLineId] = useState<string>('20m_top')
+  const [pendingLinePoint1, setPendingLinePoint1] = useState<{ x: number; y: number } | null>(null)
+
+  // Available pitch lines for line annotation (matches backend GAA_PITCH_LINES)
+  const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }> = {
+    '13m_top': { label: '13m Line (Top)', y_meters: 13.0 },
+    '20m_top': { label: '20m Line (Top)', y_meters: 20.0 },
+    '45m_top': { label: '45m Line (Top)', y_meters: 45.0 },
+    '65m_top': { label: '65m Line (Top)', y_meters: 65.0 },
+    'halfway': { label: 'Halfway Line', y_meters: 70.0 },
+    '65m_bottom': { label: '65m Line (Bottom)', y_meters: 75.0 },
+    '45m_bottom': { label: '45m Line (Bottom)', y_meters: 95.0 },
+    '20m_bottom': { label: '20m Line (Bottom)', y_meters: 120.0 },
+    '13m_bottom': { label: '13m Line (Bottom)', y_meters: 127.0 },
+  }
 
   // Processing state
   const [processing, setProcessing] = useState(false)
@@ -93,25 +126,33 @@ export default function Home() {
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsFrameCanvasRef = useRef<HTMLCanvasElement>(null)
   const resultsFrameImageRef = useRef<HTMLImageElement | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
+  // Import/Export and copy status messages
+  const [importStatus, setImportStatus] = useState<string>('')
+  const [copyStatus, setCopyStatus] = useState<string>('')
 
   // Backend pitch canvas dimensions (canonical coordinate space)
   // All player positions from backend are in this pixel space
   const PITCH_CANVAS_W = 850
-  const PITCH_CANVAS_H = 1450
+  const PITCH_CANVAS_H = 1400
 
   // Display canvas dimensions - MUST maintain same aspect ratio as backend canvas
-  // Aspect ratio = 850/1450 = 0.5862
+  // Aspect ratio = 850/1400 = 0.607
   // We scale down to fit the UI while preserving exact proportions
   const DISPLAY_SCALE = 0.4  // 40% of backend canvas size
   const PITCH_DISPLAY_WIDTH = Math.round(PITCH_CANVAS_W * DISPLAY_SCALE)   // 340
-  const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 580
+  const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 560
 
-  // Actual GAA pitch dimensions in meters (145m includes goal area)
+  // Actual GAA pitch dimensions in meters
   const GAA_PITCH_WIDTH = 85.0
-  const GAA_PITCH_LENGTH = 145.0
+  const GAA_PITCH_LENGTH = 140.0
 
   // Pitch canvas ref for the diagram
   const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
+
+  // Import annotations file input ref
+  const importAnnotationsRef = useRef<HTMLInputElement>(null)
 
   // Pending click state - when user clicks frame, we wait for pitch point selection
   const [pendingFrameClick, setPendingFrameClick] = useState<{ x: number; y: number } | null>(null)
@@ -127,8 +168,8 @@ export default function Home() {
     // Goal posts
     "top_goal_lp": [39.25, 0.0],
     "top_goal_rp": [45.75, 0.0],
-    "bottom_goal_lp": [39.25, 145.0],
-    "bottom_goal_rp": [45.75, 145.0],
+    "bottom_goal_lp": [39.25, 140.0],
+    "bottom_goal_rp": [45.75, 140.0],
 
     // Goalie box
     "left_box_bottom": [35.5, 135.5],
@@ -182,6 +223,27 @@ export default function Home() {
     "center_left": [0.0, 70.0],
     "center_right": [85.0, 70.0],
   }
+
+  // Pitch line segments for Type B (line-constrained) annotations
+  const PITCH_LINE_SEGMENTS: Array<{ name: string; x1: number; y1: number; x2: number; y2: number }> = [
+    { name: 'left_sideline', x1: 0, y1: 0, x2: 0, y2: 140 },
+    { name: 'right_sideline', x1: 85, y1: 0, x2: 85, y2: 140 },
+    { name: 'top_endline', x1: 0, y1: 0, x2: 85, y2: 0 },
+    { name: 'bottom_endline', x1: 0, y1: 140, x2: 85, y2: 140 },
+    { name: '13m_top', x1: 0, y1: 13, x2: 85, y2: 13 },
+    { name: '13m_bottom', x1: 0, y1: 127, x2: 85, y2: 127 },
+    { name: '20m_top', x1: 0, y1: 20, x2: 85, y2: 20 },
+    { name: '20m_bottom', x1: 0, y1: 120, x2: 85, y2: 120 },
+    { name: '45m_top', x1: 0, y1: 45, x2: 85, y2: 45 },
+    { name: '45m_bottom', x1: 0, y1: 95, x2: 85, y2: 95 },
+    { name: '65m_top', x1: 0, y1: 65, x2: 85, y2: 65 },
+    { name: '65m_bottom', x1: 0, y1: 75, x2: 85, y2: 75 },
+    { name: 'halfway', x1: 0, y1: 70, x2: 85, y2: 70 },
+    { name: 'left_13m_box_top_v', x1: 33, y1: 0, x2: 33, y2: 13 },
+    { name: 'left_13m_box_bottom_v', x1: 33, y1: 127, x2: 33, y2: 140 },
+    { name: 'right_13m_box_top_v', x1: 52, y1: 0, x2: 52, y2: 13 },
+    { name: 'right_13m_box_bottom_v', x1: 52, y1: 127, x2: 52, y2: 140 },
+  ]
 
   // Helper to convert pitch coordinates to canvas coordinates
   const pitchToCanvas = (pitchX: number, pitchY: number): { x: number; y: number } => {
@@ -246,7 +308,8 @@ export default function Home() {
         frames.push({
           frame_idx: frameIdx,
           isSkipped: false,
-          points: []
+          points: [],
+          lines: []
         })
       }
     }
@@ -254,6 +317,28 @@ export default function Home() {
     setAnchorFrames(frames)
     setCurrentAnchorIdx(0)
     if (frames.length > 0) {
+      // Check for saved annotations in localStorage
+      const savedKey = videoFile ? `gaa_annotations_${videoFile.name}` : null
+      if (savedKey) {
+        const saved = localStorage.getItem(savedKey)
+        if (saved) {
+          try {
+            const parsed: AnchorFrame[] = JSON.parse(saved)
+            if (confirm(`Found saved annotations for this video (${parsed.length} frames). Restore them?`)) {
+              // Merge saved points/lines into newly generated frames
+              const merged = frames.map(f => {
+                const match = parsed.find(p => p.frame_idx === f.frame_idx)
+                return match ? { ...f, isSkipped: match.isSkipped, points: match.points, lines: match.lines || [] } : f
+              })
+              setAnchorFrames(merged)
+              loadFrameImage(merged[0].frame_idx)
+              return
+            }
+          } catch (_) {
+            console.warn('Could not restore saved annotations - data may be corrupt')
+          }
+        }
+      }
       loadFrameImage(frames[0].frame_idx)
     }
   }
@@ -319,10 +404,75 @@ export default function Home() {
     // Draw image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-    // Draw annotation points for current anchor frame
     const currentAnchor = anchorFrames[currentAnchorIdx]
+    const imgScale = canvas.width / img.naturalWidth
+
+    // Draw line annotations for current anchor frame
+    if (currentAnchor && currentAnchor.lines) {
+      currentAnchor.lines.forEach((line) => {
+        const x1 = line.u1 * imgScale
+        const y1 = line.v1 * imgScale
+        const x2 = line.u2 * imgScale
+        const y2 = line.v2 * imgScale
+
+        // Draw dashed line
+        ctx.strokeStyle = '#00ffff'
+        ctx.lineWidth = 3
+        ctx.setLineDash([10, 5])
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        // Draw endpoints
+        ctx.fillStyle = '#00ffff'
+        ctx.beginPath()
+        ctx.arc(x1, y1, 6, 0, 2 * Math.PI)
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(x2, y2, 6, 0, 2 * Math.PI)
+        ctx.fill()
+
+        // Draw label at midpoint
+        const midX = (x1 + x2) / 2
+        const midY = (y1 + y2) / 2
+        ctx.fillStyle = '#000000'
+        ctx.fillRect(midX - 40, midY - 10, 80, 20)
+        ctx.fillStyle = '#00ffff'
+        ctx.font = 'bold 11px Arial'
+        ctx.textAlign = 'center'
+        ctx.fillText(AVAILABLE_LINES[line.line_id]?.label || line.line_id, midX, midY + 4)
+        ctx.textAlign = 'left'
+      })
+    }
+
+    // Draw pending line point (first click in line mode)
+    if (pendingLinePoint1) {
+      const x = pendingLinePoint1.x * imgScale
+      const y = pendingLinePoint1.y * imgScale
+
+      // Draw pulsing point
+      ctx.fillStyle = '#ffff00'
+      ctx.beginPath()
+      ctx.arc(x, y, 10, 0, 2 * Math.PI)
+      ctx.fill()
+      ctx.strokeStyle = '#000000'
+      ctx.lineWidth = 2
+      ctx.stroke()
+
+      // Draw instruction
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
+      ctx.fillRect(x - 80, y + 15, 160, 25)
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 12px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText('Click second point on line', x, y + 32)
+      ctx.textAlign = 'left'
+    }
+
+    // Draw annotation points for current anchor frame
     if (currentAnchor && currentAnchor.points) {
-      const imgScale = canvas.width / img.naturalWidth
       currentAnchor.points.forEach((point) => {
         const x = point.x_img * imgScale
         const y = point.y_img * imgScale
@@ -344,7 +494,7 @@ export default function Home() {
         ctx.fillText(point.pitch_id, x + 12, y + 4)
       })
     }
-  }, [anchorFrames, currentAnchorIdx])
+  }, [anchorFrames, currentAnchorIdx, pendingLinePoint1, AVAILABLE_LINES])
 
   // Handle click on frame to mark a point (first step of annotation)
   const handleFrameClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -371,8 +521,52 @@ export default function Home() {
     const x = clickX * cssToCanvasX * canvasToImageX
     const y = clickY * cssToCanvasY * canvasToImageY
 
-    // Store the pending frame click - user must now click on pitch diagram
-    setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
+    if (annotationMode === 'line') {
+      // Line annotation mode
+      if (!pendingLinePoint1) {
+        // First click - store first point
+        setPendingLinePoint1({ x: Math.round(x), y: Math.round(y) })
+      } else {
+        // Second click - create line annotation
+        const newLine: LineAnnotation = {
+          line_id: selectedLineId,
+          u1: pendingLinePoint1.x,
+          v1: pendingLinePoint1.y,
+          u2: Math.round(x),
+          v2: Math.round(y)
+        }
+
+        setAnchorFrames(prev => {
+          const updated = [...prev]
+          // Remove existing line of same type if exists
+          updated[currentAnchorIdx].lines = updated[currentAnchorIdx].lines.filter(
+            l => l.line_id !== selectedLineId
+          )
+          updated[currentAnchorIdx].lines.push(newLine)
+          return updated
+        })
+
+        // Clear pending state
+        setPendingLinePoint1(null)
+      }
+    } else {
+      // Point annotation mode - store the pending frame click, user must click on pitch diagram
+      setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
+    }
+  }
+
+  // Cancel line annotation in progress
+  const cancelLineAnnotation = () => {
+    setPendingLinePoint1(null)
+  }
+
+  // Remove line annotation
+  const removeLine = (lineIdx: number) => {
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx].lines = updated[currentAnchorIdx].lines.filter((_, i) => i !== lineIdx)
+      return updated
+    })
   }
 
   // Handle click on pitch diagram to complete annotation
@@ -422,6 +616,49 @@ export default function Home() {
       })
 
       // Clear pending state
+      setPendingFrameClick(null)
+      return
+    }
+
+    // No vertex found within 20px — try nearest pitch line segment (Type B click)
+    let nearestLine: typeof PITCH_LINE_SEGMENTS[0] | null = null
+    let nearestLineDist = Infinity
+    let lineT = 0
+
+    for (const seg of PITCH_LINE_SEGMENTS) {
+      const p1 = pitchToCanvas(seg.x1, seg.y1)
+      const p2 = pitchToCanvas(seg.x2, seg.y2)
+      const dx = p2.x - p1.x
+      const dy = p2.y - p1.y
+      const lenSq = dx * dx + dy * dy
+      const t = lenSq > 0 ? Math.max(0, Math.min(1, ((clickX - p1.x) * dx + (clickY - p1.y) * dy) / lenSq)) : 0
+      const projX = p1.x + t * dx
+      const projY = p1.y + t * dy
+      const dist = Math.sqrt(Math.pow(projX - clickX, 2) + Math.pow(projY - clickY, 2))
+      if (dist < nearestLineDist && dist < 15) {
+        nearestLineDist = dist
+        nearestLine = seg
+        lineT = t
+      }
+    }
+
+    if (nearestLine) {
+      const pitchX = nearestLine.x1 + lineT * (nearestLine.x2 - nearestLine.x1)
+      const pitchY = nearestLine.y1 + lineT * (nearestLine.y2 - nearestLine.y1)
+      const pitchId = `line_${nearestLine.name}_x${pitchX.toFixed(1)}_y${pitchY.toFixed(1)}`
+
+      const newPoint: PitchPoint = {
+        pitch_id: pitchId,
+        x_img: pendingFrameClick.x,
+        y_img: pendingFrameClick.y
+      }
+
+      setAnchorFrames(prev => {
+        const updated = [...prev]
+        updated[currentAnchorIdx].points.push(newPoint)
+        return updated
+      })
+
       setPendingFrameClick(null)
     }
   }
@@ -530,6 +767,23 @@ export default function Home() {
     const currentAnchor = anchorFrames[currentAnchorIdx]
     const annotatedIds = currentAnchor ? currentAnchor.points.map(p => p.pitch_id) : []
 
+    // When pending click, subtly highlight all line segments to show they're clickable
+    if (pendingFrameClick) {
+      ctx.strokeStyle = 'rgba(255, 255, 100, 0.4)'
+      ctx.lineWidth = 6
+      for (const seg of PITCH_LINE_SEGMENTS) {
+        const p1 = pitchToCanvas(seg.x1, seg.y1)
+        const p2 = pitchToCanvas(seg.x2, seg.y2)
+        ctx.beginPath()
+        ctx.moveTo(p1.x, p1.y)
+        ctx.lineTo(p2.x, p2.y)
+        ctx.stroke()
+      }
+      // Reset for vertex drawing
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 2
+    }
+
     // Draw all vertex points
     for (const [id, coords] of Object.entries(GAA_PITCH_VERTICES)) {
       const pos = pitchToCanvas(coords[0], coords[1])
@@ -555,14 +809,17 @@ export default function Home() {
     // If there's a pending click, show instruction
     if (pendingFrameClick) {
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 40, PITCH_DISPLAY_WIDTH - 20, 30)
+      ctx.fillRect(10, PITCH_DISPLAY_HEIGHT - 50, PITCH_DISPLAY_WIDTH - 20, 40)
       ctx.fillStyle = '#ffffff'
       ctx.font = 'bold 12px Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('Click a point on this pitch diagram', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 20)
+      ctx.fillText('Click a vertex (●) or anywhere on a line', PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 30)
+      ctx.font = '10px Arial'
+      ctx.fillStyle = '#aaaaaa'
+      ctx.fillText(`Frame: (${pendingFrameClick.x}, ${pendingFrameClick.y})`, PITCH_DISPLAY_WIDTH / 2, PITCH_DISPLAY_HEIGHT - 14)
       ctx.textAlign = 'left'
     }
-  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pitchToCanvas])
+  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pitchToCanvas, PITCH_LINE_SEGMENTS])
 
   // Remove annotation point
   const removePoint = (pointIdx: number) => {
@@ -602,12 +859,112 @@ export default function Home() {
       updated[currentAnchorIdx] = {
         frame_idx: newFrameIdx,
         isSkipped: false,
-        points: [] // Clear points when swapping
+        points: [], // Clear points when swapping
+        lines: []   // Clear lines when swapping
       }
       return updated
     })
 
     loadFrameImage(newFrameIdx)
+  }
+
+  // Export annotations to JSON file
+  const exportAnnotations = () => {
+    const filename = videoFile?.name || 'unknown'
+    const data = {
+      videoFilename: filename,
+      anchorFrames: anchorFrames.map(af => ({
+        frame_idx: af.frame_idx,
+        isSkipped: af.isSkipped,
+        points: af.points,
+        lines: af.lines || [],
+      })),
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `annotations_${filename}_${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Import annotations from JSON file
+  const importAnnotations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target?.result as string)
+        if (!parsed.anchorFrames || !Array.isArray(parsed.anchorFrames)) {
+          alert('Invalid annotation file format.')
+          return
+        }
+        const imported: AnchorFrame[] = parsed.anchorFrames.map((af: any) => ({
+          frame_idx: af.frame_idx,
+          isSkipped: !!af.isSkipped,
+          points: Array.isArray(af.points) ? af.points : [],
+          lines: Array.isArray(af.lines) ? af.lines : [],
+        }))
+        if (anchorFrames.length > 0) {
+          // Merge imported data into existing anchor frame slots
+          const frameIndices = new Set(anchorFrames.map(f => f.frame_idx))
+          const importedIndices = imported.map(f => f.frame_idx)
+          const hasMismatch = importedIndices.some(idx => !frameIndices.has(idx))
+          if (hasMismatch) {
+            if (!confirm('Some imported frame indices do not match current anchor frames. Import anyway (matching frames will be updated)?')) return
+          }
+          const merged = anchorFrames.map(f => {
+            const match = imported.find(p => p.frame_idx === f.frame_idx)
+            return match ? { ...f, isSkipped: match.isSkipped, points: match.points, lines: match.lines } : f
+          })
+          setAnchorFrames(merged)
+          if (merged.length > 0) loadFrameImage(merged[0].frame_idx)
+        } else {
+          setAnchorFrames(imported)
+          if (imported.length > 0) loadFrameImage(imported[0].frame_idx)
+        }
+        setCurrentAnchorIdx(0)
+      } catch (err: any) {
+        alert(`Failed to parse annotation file: ${err?.message || 'Invalid format'}`)
+      }
+    }
+    reader.readAsText(file)
+    // Reset input so same file can be re-imported
+    e.target.value = ''
+  }
+
+  // Copy points from previous non-skipped anchor frame
+  const copyFromPrevious = () => {
+    let srcIdx = currentAnchorIdx - 1
+    while (srcIdx >= 0 && anchorFrames[srcIdx].isSkipped) srcIdx--
+    if (srcIdx < 0 || anchorFrames[srcIdx].points.length === 0) return
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx] = {
+        ...updated[currentAnchorIdx],
+        points: [...anchorFrames[srcIdx].points],
+        lines: [...(anchorFrames[srcIdx].lines || [])],
+      }
+      return updated
+    })
+  }
+
+  // Copy points from next non-skipped anchor frame
+  const copyFromNext = () => {
+    let srcIdx = currentAnchorIdx + 1
+    while (srcIdx < anchorFrames.length && anchorFrames[srcIdx].isSkipped) srcIdx++
+    if (srcIdx >= anchorFrames.length || anchorFrames[srcIdx].points.length === 0) return
+    setAnchorFrames(prev => {
+      const updated = [...prev]
+      updated[currentAnchorIdx] = {
+        ...updated[currentAnchorIdx],
+        points: [...anchorFrames[srcIdx].points],
+        lines: [...(anchorFrames[srcIdx].lines || [])],
+      }
+      return updated
+    })
   }
 
   // Process video with annotations
@@ -618,17 +975,23 @@ export default function Home() {
     }
 
     // Get annotated anchor frames (non-skipped with at least 4 points)
-    const validAnnotations: PitchAnnotation[] = anchorFrames
+    // Use v2 format with lines included
+    const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
       .filter(af => !af.isSkipped && af.points.length >= 4)
       .map(af => ({
         frame_idx: af.frame_idx,
-        points: af.points
+        points: af.points,
+        lines: af.lines || []
       }))
 
     if (validAnnotations.length === 0) {
       setError('Please annotate at least one anchor frame with 4+ points')
       return
     }
+
+    // Log line annotations for debugging
+    const totalLines = validAnnotations.reduce((sum, a) => sum + a.lines.length, 0)
+    console.log(`Processing with ${validAnnotations.length} anchor frames and ${totalLines} line constraints`)
 
     setProcessing(true)
     setError('')
@@ -773,7 +1136,7 @@ export default function Home() {
     }
 
     // Draw player positions
-    // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1450 for y)
+    // Backend returns coordinates in PITCH CANVAS PIXELS (0-850 for x, 0-1400 for y)
     // Scale to display canvas: x_display = (x_pitch / PITCH_CANVAS_W) * DISPLAY_WIDTH
     framePositions.forEach((pos) => {
       const x = (pos.x_pitch / PITCH_CANVAS_W) * RESULTS_PITCH_WIDTH
@@ -899,6 +1262,18 @@ export default function Home() {
     }, intervalMs)
   }, [getFramesWithPositions, playbackSpeed, videoMetadata, processedFps, stopPlayback])
 
+  // Restart playback interval when playbackSpeed changes while playing.
+  // `startPlayback` is wrapped with useCallback and already re-creates the
+  // interval using the latest `playbackSpeed` from its closure.  Including it
+  // in the dep array would cause an infinite restart loop because every speed
+  // change updates `startPlayback`, which would then fire this effect again.
+  // The eslint-disable is intentional and safe here.
+  useEffect(() => {
+    if (isPlaying) {
+      startPlayback()
+    }
+  }, [playbackSpeed]) // eslint-disable-line react-hooks/exhaustive-deps
+
 
   const togglePlayback = useCallback(() => {
     if (isPlaying) {
@@ -939,9 +1314,12 @@ export default function Home() {
   // Sync video player with current frame
   useEffect(() => {
     if (isSyncMode && videoPlayerRef.current && videoMetadata && playerPositions.length > 0) {
-      const timeInSeconds = currentFrame / videoMetadata.fps
-      if (Math.abs(videoPlayerRef.current.currentTime - timeInSeconds) > 0.1) {
-        videoPlayerRef.current.currentTime = timeInSeconds
+      const video = videoPlayerRef.current
+      if (video.readyState >= 2) {  // HAVE_CURRENT_DATA or better
+        const timeInSeconds = currentFrame / videoMetadata.fps
+        if (Math.abs(video.currentTime - timeInSeconds) > 0.1) {
+          video.currentTime = timeInSeconds
+        }
       }
     }
   }, [currentFrame, isSyncMode, videoMetadata, playerPositions.length])
@@ -982,6 +1360,7 @@ export default function Home() {
     setLoadingWarpedFrame(true)
     try {
       const url = `${API_URL}/videos/${videoMetadata.video_id}/warped-frame/${frameIdx}`
+      console.log(`Loading warped frame from: ${url}`)
       // Test if the endpoint exists first
       const response = await fetch(url)
       if (response.ok) {
@@ -1025,7 +1404,7 @@ export default function Home() {
       return homographyFrameIndices.map(frameIdx => {
         // Find the anchor frame data if it exists
         const anchor = anchorFrames.find(af => af.frame_idx === frameIdx)
-        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [] }
+        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [], lines: [] }
       })
     }
     // Fall back to local anchor frames (before processing)
@@ -1037,7 +1416,7 @@ export default function Home() {
     if (!loadingFrame && frameImageRef.current && anchorFrames.length > 0) {
       drawFrameWithPoints()
     }
-  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame])
+  }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame, pendingLinePoint1])
 
   // Redraw pitch diagram when pending click changes or annotations change
   useEffect(() => {
@@ -1053,7 +1432,37 @@ export default function Home() {
     }
   }, [currentFrame, playerPositions, drawPitch])
 
+  // Auto-save annotations to localStorage whenever anchorFrames changes
+  useEffect(() => {
+    if (anchorFrames.length > 0 && videoFile) {
+      localStorage.setItem(`gaa_annotations_${videoFile.name}`, JSON.stringify(anchorFrames))
+    }
+  }, [anchorFrames, videoFile])
+
   const currentAnchor = anchorFrames[currentAnchorIdx]
+
+  // Coverage quality metrics for current anchor frame
+  const pointCount = currentAnchor ? currentAnchor.points.length : 0
+  const coverageColor = pointCount < 4 ? '#ff4444' : pointCount < 7 ? '#ffaa00' : '#44ff44'
+  let coveragePercent = 0
+  let clustered = false
+  if (currentAnchor && currentAnchor.points.length >= 2) {
+    const pitchCoords = currentAnchor.points.map(p => {
+      const vert = GAA_PITCH_VERTICES[p.pitch_id]
+      if (vert) return { x: vert[0], y: vert[1] }
+    const match = p.pitch_id.match(/x([-\d.]+)_y([-\d.]+)$/)
+      if (match) return { x: parseFloat(match[1]), y: parseFloat(match[2]) }
+      return null
+    }).filter(Boolean) as Array<{ x: number; y: number }>
+    if (pitchCoords.length >= 2) {
+      const xs = pitchCoords.map(c => c.x)
+      const ys = pitchCoords.map(c => c.y)
+      const bboxW = Math.max(...xs) - Math.min(...xs)
+      const bboxH = Math.max(...ys) - Math.min(...ys)
+      coveragePercent = Math.round(bboxW * bboxH / (GAA_PITCH_WIDTH * GAA_PITCH_LENGTH) * 100)
+      clustered = coveragePercent < 10
+    }
+  }
 
   return (
     <>
@@ -1064,7 +1473,7 @@ export default function Home() {
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <div className="container">
-        <h1>⚽ GAA Video Analysis System</h1>
+        <h1>GAA Video Analysis System</h1>
 
         {/* Step 1: Upload Video */}
         <div className="upload-section">
@@ -1199,7 +1608,14 @@ export default function Home() {
                 <span>
                   Anchor {currentAnchorIdx + 1} of {anchorFrames.length} |
                   Frame {currentAnchor.frame_idx} |
-                  Points: {currentAnchor.points.length}/4+
+                  Points: {currentAnchor.points.length}/4+ | Lines: {currentAnchor.lines?.length || 0}
+                </span>
+                {/* Coverage quality badge */}
+                <span style={{ marginLeft: 12, fontSize: 12 }}>
+                  <span style={{ color: coverageColor }}>●</span>{' '}
+                  {pointCount} points
+                  {currentAnchor.points.length >= 2 && ` | Coverage: ${coveragePercent}%`}
+                  {clustered && ' | ⚠ Clustered'}
                 </span>
                 <div className="anchor-actions">
                   <button
@@ -1214,15 +1630,89 @@ export default function Home() {
                   }}>
                     Swap Frame
                   </button>
+                  <button
+                    onClick={copyFromPrevious}
+                    disabled={currentAnchorIdx === 0 || !anchorFrames.slice(0, currentAnchorIdx).some(f => !f.isSkipped && f.points.length > 0)}
+                    title="Copy annotations from the previous non-skipped frame"
+                  >
+                    ← Copy Previous
+                  </button>
+                  <button
+                    onClick={copyFromNext}
+                    disabled={currentAnchorIdx === anchorFrames.length - 1 || !anchorFrames.slice(currentAnchorIdx + 1).some(f => !f.isSkipped && f.points.length > 0)}
+                    title="Copy annotations from the next non-skipped frame"
+                  >
+                    Copy Next →
+                  </button>
                 </div>
+                {copyStatus && (
+                  <span style={{ marginLeft: 8, fontSize: 12, color: '#44ff44' }}>{copyStatus}</span>
+                )}
               </div>
             )}
 
             {!currentAnchor?.isSkipped && (
               <>
+                {/* Annotation Mode Toggle */}
+                <div className="annotation-mode-toggle">
+                  <label className="mode-label">Annotation Mode:</label>
+                  <div className="mode-buttons">
+                    <button
+                      className={`mode-btn ${annotationMode === 'point' ? 'active' : ''}`}
+                      onClick={() => {
+                        setAnnotationMode('point')
+                        setPendingLinePoint1(null)
+                      }}
+                    >
+                      📍 Point Mode
+                    </button>
+                    <button
+                      className={`mode-btn ${annotationMode === 'line' ? 'active' : ''}`}
+                      onClick={() => {
+                        setAnnotationMode('line')
+                        setPendingFrameClick(null)
+                      }}
+                    >
+                      📏 Line Mode
+                    </button>
+                  </div>
+
+                  {annotationMode === 'line' && (
+                    <div className="line-selector">
+                      <label>Select Line:</label>
+                      <select
+                        value={selectedLineId}
+                        onChange={(e) => setSelectedLineId(e.target.value)}
+                      >
+                        {Object.entries(AVAILABLE_LINES).map(([id, info]) => (
+                          <option key={id} value={id}>
+                            {info.label} (Y={info.y_meters}m)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
                 {/* Instructions */}
                 <div className="annotation-instructions">
-                  {pendingFrameClick ? (
+                  {annotationMode === 'line' ? (
+                    pendingLinePoint1 ? (
+                      <p className="pending-instruction line-mode">
+                        ✓ First point selected at ({pendingLinePoint1.x}, {pendingLinePoint1.y}).
+                        <strong> Click the second point on the {AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}.</strong>
+                        <button onClick={cancelLineAnnotation} className="cancel-btn">
+                          Cancel
+                        </button>
+                      </p>
+                    ) : (
+                      <p className="line-mode-instruction">
+                        📏 <strong>Line Mode:</strong> Click two points on the <em>{AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}</em> in the video frame.
+                        <br />
+                        <small>Line constraints improve homography accuracy in midfield regions where point intersections aren't visible.</small>
+                      </p>
+                    )
+                  ) : pendingFrameClick ? (
                     <p className="pending-instruction">
                       ✓ Frame point selected at ({pendingFrameClick.x}, {pendingFrameClick.y}).
                       <strong> Now click the corresponding point on the pitch diagram →</strong>
@@ -1234,7 +1724,7 @@ export default function Home() {
                       </button>
                     </p>
                   ) : (
-                    <p>Click a point on the video frame, then select the corresponding pitch location on the diagram.</p>
+                    <p>📍 <strong>Point Mode:</strong> Click a point on the video frame, then select the corresponding pitch location on the diagram.</p>
                   )}
                 </div>
 
@@ -1252,7 +1742,7 @@ export default function Home() {
                       <canvas
                         ref={frameCanvasRef}
                         onClick={handleFrameClick}
-                        className={`frame-canvas ${pendingFrameClick ? 'has-pending' : ''}`}
+                        className={`frame-canvas ${annotationMode === 'line' ? 'line-mode' : ''} ${pendingFrameClick || pendingLinePoint1 ? 'has-pending' : ''}`}
                       />
                     )}
                   </div>
@@ -1278,14 +1768,41 @@ export default function Home() {
                   <div className="points-list">
                     <h4>Annotated Points ({currentAnchor.points.length}):</h4>
                     <div className="points-grid">
-                      {currentAnchor.points.map((point, idx) => (
-                        <div key={idx} className="point-item">
+                      {currentAnchor.points.map((point, idx) => {
+                        const isLinePoint = point.pitch_id.startsWith('line_')
+                        return (
+                          <div key={idx} className="point-item">
+                            <span>
+                              <strong style={isLinePoint ? { color: '#88ccff' } : undefined}>
+                                {getPointLabel(point.pitch_id)}
+                                {isLinePoint && <em style={{ fontWeight: 'normal', fontSize: '0.85em' }}> (line)</em>}
+                              </strong>
+                              <br/>
+                              <small>Frame: ({point.x_img}, {point.y_img})</small>
+                            </span>
+                            <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Current lines list */}
+                {currentAnchor && currentAnchor.lines && currentAnchor.lines.length > 0 && (
+                  <div className="lines-list">
+                    <h4>📏 Annotated Lines ({currentAnchor.lines.length}):</h4>
+                    <div className="lines-grid">
+                      {currentAnchor.lines.map((line, idx) => (
+                        <div key={idx} className="line-item">
                           <span>
-                            <strong>{getPointLabel(point.pitch_id)}</strong>
+                            <strong>{AVAILABLE_LINES[line.line_id]?.label || line.line_id}</strong>
                             <br/>
-                            <small>Frame: ({point.x_img}, {point.y_img})</small>
+                            <small>
+                              ({Math.round(line.u1)}, {Math.round(line.v1)}) → ({Math.round(line.u2)}, {Math.round(line.v2)})
+                            </small>
                           </span>
-                          <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
+                          <button onClick={() => removeLine(idx)} className="remove-btn">×</button>
                         </div>
                       ))}
                     </div>
@@ -1319,6 +1836,21 @@ export default function Home() {
                   {anchorFrames.filter(af => af.isSkipped).length} frames skipped |{' '}
                   {anchorFrames.filter(af => !af.isSkipped && af.points.length < 4).length} frames incomplete
                 </p>
+              </div>
+              <div className="annotation-io-buttons">
+                <button onClick={exportAnnotations} className="secondary-btn">
+                  ⬇ Export Annotations
+                </button>
+                <button onClick={() => importAnnotationsRef.current?.click()} className="secondary-btn">
+                  ⬆ Import Annotations
+                </button>
+                <input
+                  ref={importAnnotationsRef}
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  onChange={importAnnotations}
+                />
               </div>
               <button
                 onClick={processVideo}

@@ -10,7 +10,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: YOLO_MODEL_PATH
-        value: models/best.pt
+        value: models/v8s_960_v9.pt
       - key: ALLOWED_ORIGINS
         sync: false  # Set this in Render dashboard to your frontend URL
       - key: MAX_VIDEO_SIZE_MB

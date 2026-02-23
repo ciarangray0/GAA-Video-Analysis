@@ -13,8 +13,8 @@ GAA_PITCH_VERTICES = {
     # Goal centers
     "top_goal_lp": (39.25, 0.0),
     "top_goal_rp": (45.75, 0.0),
-    "bottom_goal_lp": (39.25, 145.0),
-    "bottom_goal_rp": (45.75, 145.0),
+    "bottom_goal_lp": (39.25, 140.0),
+    "bottom_goal_rp": (45.75, 140.0),
 
     # goalie box
     "left_box_bottom": (35.5, GAA_PITCH_LENGTH - 4.5),
@@ -62,5 +62,41 @@ GAA_PITCH_VERTICES = {
     "left_65m_line_bottom": (0.0, GAA_PITCH_LENGTH - 65.0),
     "left_65m_line_top": (0.0, 65.0),
     "right_65m_line_bottom": (85.0, GAA_PITCH_LENGTH - 65.0),
-    "right_65m_line_top": (85.0, 65.0)
+    "right_65m_line_top": (85.0, 65.0),
+
+    # Center line (halfway)
+    "center_left": (0.0, 70.0),
+    "center_right": (85.0, 70.0),
 }
+
+# =============================================================================
+# GAA Pitch Horizontal Lines (for line-constrained homography)
+# =============================================================================
+# These are horizontal lines that cross the full width of the pitch.
+# Used as additional constraints when computing homography in regions
+# where point intersections are not visible (e.g., midfield).
+#
+# The Y-values are in meters from the top goal line.
+# See pipeline/line_constraints.py for usage.
+
+GAA_PITCH_LINES = {
+    # Top half of pitch (near goal at Y=0)
+    "endline_top": 0.0,
+    "small_rectangle_top": 4.5,      # Goal area line
+    "13m_top": 13.0,
+    "20m_top": 20.0,
+    "45m_top": 45.0,
+    "65m_top": 65.0,
+
+    # Halfway line (pitch is 140m, halfway at 70m)
+    "halfway": 72.5,
+
+    # Bottom half of pitch (near goal at Y=140m)
+    "65m_bottom": 75.0,              # 140 - 65 = 75
+    "45m_bottom": 95.0,              # 140 - 45 = 95
+    "20m_bottom": 120.0,             # 140 - 20 = 120
+    "13m_bottom": 127.0,             # 140 - 13 = 127
+    "small_rectangle_bottom": 135.5, # 140 - 4.5 = 135.5
+    "endline_bottom": 140.0,
+}
+
