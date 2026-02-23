@@ -399,6 +399,26 @@ button.warning:hover {
   margin-bottom: 15px;
 }
 
+.annotation-io-buttons {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.secondary-btn {
+  padding: 10px 20px;
+  font-size: 14px;
+  background-color: #1976d2;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.secondary-btn:hover {
+  background-color: #1565c0;
+}
+
 .process-btn {
   padding: 15px 40px;
   font-size: 18px;
