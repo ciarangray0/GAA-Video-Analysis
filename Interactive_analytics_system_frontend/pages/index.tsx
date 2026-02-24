@@ -84,9 +84,6 @@ export default function Home() {
   const [selectedLineId, setSelectedLineId] = useState<string>('20m_top')
   const [pendingLinePoint1, setPendingLinePoint1] = useState<{ x: number; y: number } | null>(null)
 
-
-  const [keepPipelineVisible, setKeepPipelineVisible] = useState(false)
-
   // Available pitch lines for line annotation (matches backend GAA_PITCH_LINES)
   const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }> = {
     '13m_top': { label: '13m Line (Top)', y_meters: 13.0 },
