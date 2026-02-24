@@ -17,7 +17,6 @@ Meters are NOT used - all coordinates are pitch canvas pixels.
 """
 from typing import List
 import numpy as np
-from scipy.interpolate import CubicSpline
 from scipy.signal import savgol_filter
 
 from pipeline.config import OUT_W, OUT_H
@@ -85,24 +84,10 @@ def interpolate_trajectories(
         known_xs = np.array([p.x_pitch for p in positions_sorted])
         known_ys = np.array([p.y_pitch for p in positions_sorted])
 
-        if len(positions_sorted) >= 3:
-            # Cubic spline interpolation within the known range; linear
-            # extrapolation (boundary clamping) outside it.
-            cs_x = CubicSpline(known_frames, known_xs)
-            cs_y = CubicSpline(known_frames, known_ys)
-
-            # Start with linear interp to handle extrapolation safely
-            xs_interp = np.interp(frames_interp, known_frames, known_xs)
-            ys_interp = np.interp(frames_interp, known_frames, known_ys)
-
-            # Overwrite interpolated region with cubic spline values
-            in_range = (frames_interp >= known_frames[0]) & (frames_interp <= known_frames[-1])
-            xs_interp[in_range] = cs_x(frames_interp[in_range])
-            ys_interp[in_range] = cs_y(frames_interp[in_range])
-        else:
-            # Linear interpolation for exactly 2 anchor points
-            xs_interp = np.interp(frames_interp, known_frames, known_xs)
-            ys_interp = np.interp(frames_interp, known_frames, known_ys)
+        # Use simple linear interpolation for all tracks with >=2 anchors.
+        # This avoids cubic-spline overshoot and keeps trajectories stable.
+        xs_interp = np.interp(frames_interp, known_frames, known_xs)
+        ys_interp = np.interp(frames_interp, known_frames, known_ys)
 
         # Clamp to valid pitch canvas bounds
         xs_interp = np.clip(xs_interp, 0, OUT_W)

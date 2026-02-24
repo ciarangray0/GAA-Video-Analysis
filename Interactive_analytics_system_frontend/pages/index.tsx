@@ -1804,7 +1804,7 @@ export default function Home() {
         )}
 
         {/* Step 3: Annotate Anchor Frames */}
-        {anchorFrames.length > 0 && playerPositions.length === 0 && (
+        {anchorFrames.length > 0 && (
           <div className="annotation-section">
             <h2>3. Annotate Anchor Frames</h2>
 
