@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def run_tracking(video_path: str) -> List[Detection]:
     """
-    Run YOLO detection and ByteTrack tracking on a video.
+    Run YOLO detection and Botsort tracking on a video.
     
     This function delegates to either:
     - Remote GPU inference (Modal) if GPU_PROVIDER is set
@@ -74,7 +74,7 @@ def _run_tracking_local(video_path: str) -> List[Detection]:
     # Force CPU usage
     results = model.track(
         source=video_path,
-        tracker="bytetrack.yaml",
+        tracker="botsort.yaml",
         conf=DEFAULT_CONF,
         save=False,
         stream=False,
