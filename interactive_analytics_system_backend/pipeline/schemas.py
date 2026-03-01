@@ -117,39 +117,3 @@ class HomographyWithLinesResponse(BaseModel):
     """Response for line-constrained homography computation."""
     frames: List[int]
     info: Dict[str, dict] = {}  # Frame index (as string) -> computation info
-
-
-# ---------------------------------------------------------------------------
-# Per-frame mapping / job schemas
-# ---------------------------------------------------------------------------
-
-class AnchorFrameInput(BaseModel):
-    """Input data for a single anchor frame used by per-frame mapping."""
-    keypoints_image: List[List[float]] = []
-    keypoints_canvas: List[List[float]] = []
-    H: Optional[List[List[float]]] = None  # 3×3 homography matrix (row-major)
-
-
-class PerFrameMappingRequest(BaseModel):
-    """Request body for POST /videos/{video_id}/per-frame-mappings."""
-    anchor_frames: Dict[int, AnchorFrameInput]
-    method: str = "flow"  # 'flow' | 'interpolate' | 'ptz'
-    options: Dict[str, object] = {}
-
-
-class JobStatusResponse(BaseModel):
-    """Status of a background job."""
-    job_id: str
-    video_id: str
-    status: str  # 'queued' | 'running' | 'completed' | 'failed'
-    method: str
-    progress: int
-    total: int
-    error: Optional[str] = None
-
-
-class CompareHomographiesRequest(BaseModel):
-    """Request body for POST /videos/{video_id}/compare-homographies."""
-    H1: List[List[float]]  # 3×3 matrix (row-major)
-    H2: List[List[float]]  # 3×3 matrix (row-major)
-    grid_size: int = 20
