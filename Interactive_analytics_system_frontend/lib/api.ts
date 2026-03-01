@@ -1,0 +1,99 @@
+import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, PitchAnnotation } from '../types'
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+export async function uploadVideo(file: File): Promise<VideoMetadata> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const res = await fetch(`${API_URL}/videos`, { method: 'POST', body: formData })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Upload failed')
+  }
+  return res.json()
+}
+
+export async function trackVideo(videoId: string): Promise<{ frames_processed: number; tracks: number }> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/track`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Tracking failed')
+  }
+  return res.json()
+}
+
+export async function getDetections(videoId: string): Promise<any[]> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/detections`)
+  if (!res.ok) return []
+  return res.json()
+}
+
+export async function computeHomographies(
+  videoId: string,
+  annotations: PitchAnnotation[],
+): Promise<{ frames: number[]; info: Record<string, any> }> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(annotations),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Homography computation failed')
+  }
+  const data = await res.json()
+  return { frames: data.frames || [], info: data.info || {} }
+}
+
+export async function computeHomographiesV2(
+  videoId: string,
+  annotations: AnchorFrameAnnotation[],
+): Promise<{ frames: number[]; info: Record<string, any> }> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/v2`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(annotations),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Homography computation failed')
+  }
+  const data = await res.json()
+  return { frames: data.frames || [], info: data.info || {} }
+}
+
+export async function mapPlayers(videoId: string): Promise<PlayerPosition[]> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/map_players`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Player mapping failed')
+  }
+  return res.json()
+}
+
+export async function interpolateTrajectories(
+  videoId: string,
+  startFrame: number,
+  endFrame: number,
+): Promise<{ frames_generated: number; method: string }> {
+  const res = await fetch(
+    `${API_URL}/videos/${videoId}/interpolate?start_frame=${startFrame}&end_frame=${endFrame}`,
+    { method: 'POST' },
+  )
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Interpolation failed')
+  }
+  return res.json()
+}
+
+export async function getPlayerPositions(videoId: string): Promise<PlayerPosition[]> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/players`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to fetch player positions')
+  }
+  return res.json()
+}
+
+export { API_URL }
