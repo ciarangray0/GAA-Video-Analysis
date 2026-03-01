@@ -26,10 +26,7 @@ from pipeline.schemas import (
     PlayerPitchPosition,
     ProcessVideoResponse,
     LineAnnotation,
-    AnchorFrameAnnotation,
-    PerFrameMappingRequest,
-    JobStatusResponse,
-    CompareHomographiesRequest,
+    AnchorFrameAnnotation
 )
 # NOTE: `run_tracking` performs heavy ML imports; import lazily inside endpoints to keep module import lightweight.
 # from pipeline.detect import run_tracking
@@ -909,104 +906,3 @@ async def process_video(
         logger.error(f"Processing failed for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail="Processing failed. Please try again.")
 
-
-
-# ---------------------------------------------------------------------------
-# Job management endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/jobs/", response_model=List[JobStatusResponse])
-async def list_jobs():
-    """List all background jobs."""
-    return [JobStatusResponse(**j) for j in store.jobs.values()]
-
-
-@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job(job_id: str):
-    """Get the status of a specific background job."""
-    job = store.jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return JobStatusResponse(**job)
-
-
-# ---------------------------------------------------------------------------
-# Per-frame mapping endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/videos/{video_id}/per-frame-mappings", response_model=JobStatusResponse)
-async def start_per_frame_mappings(video_id: str, request: PerFrameMappingRequest):
-    """Start asynchronous per-frame homography generation.
-
-    Supported *method* values:
-    - ``flow`` – propagate anchor keypoints with optical flow and re-solve H.
-    - ``interpolate`` – linearly interpolate anchor homography matrices.
-    - ``ptz`` – estimate PTZ camera parameters and compose per-frame H.
-    """
-    if video_id not in store.videos:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    from pipeline.frame_mappings import generate_per_frame_mappings  # lazy import
-
-    # Convert Pydantic models to plain dicts for the worker
-    anchor_frames_raw: Dict[int, dict] = {}
-    for fidx, af in request.anchor_frames.items():
-        af_dict: dict = {
-            "keypoints_image": af.keypoints_image,
-            "keypoints_canvas": af.keypoints_canvas,
-        }
-        if af.H is not None:
-            af_dict["H"] = np.array(af.H, dtype=np.float64)
-        anchor_frames_raw[int(fidx)] = af_dict
-
-    method = request.method if request.method in ("flow", "interpolate", "ptz") else "flow"
-    job_id = generate_per_frame_mappings(video_id, anchor_frames_raw, method, dict(request.options))
-
-    job = store.jobs[job_id]
-    return JobStatusResponse(**job)
-
-
-@app.get("/videos/{video_id}/per-frame-mappings/{frame_idx}")
-async def get_per_frame_mapping(video_id: str, frame_idx: int):
-    """Debug endpoint: retrieve the cached per-frame homography for a single frame.
-
-    Returns the 3×3 matrix as a nested list.
-    """
-    if video_id not in store.videos:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    cache = getattr(store, "homographies_cache_per_frame", {})
-    video_cache = cache.get(video_id)
-    if video_cache is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No per-frame mappings found. Run POST per-frame-mappings first.",
-        )
-
-    H = video_cache.get(frame_idx)
-    if H is None:
-        raise HTTPException(status_code=404, detail=f"No mapping for frame {frame_idx}")
-
-    return {"frame_idx": frame_idx, "H": np.array(H).tolist()}
-
-
-@app.post("/videos/{video_id}/compare-homographies")
-async def compare_homographies(video_id: str, request: CompareHomographiesRequest):
-    """Debug endpoint: compute a displacement heatmap between two homographies.
-
-    Accepts two 3×3 matrices (row-major nested lists) and returns displacement
-    statistics and a base64-encoded PNG heatmap.
-    """
-    if video_id not in store.videos:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    from pipeline.frame_mappings import compare_homography_heatmap  # lazy import
-
-    H1 = np.array(request.H1, dtype=np.float64)
-    H2 = np.array(request.H2, dtype=np.float64)
-
-    if H1.shape != (3, 3) or H2.shape != (3, 3):
-        raise HTTPException(status_code=400, detail="H1 and H2 must be 3×3 matrices")
-
-    result = compare_homography_heatmap(H1, H2, grid_size=request.grid_size)
-    return result
