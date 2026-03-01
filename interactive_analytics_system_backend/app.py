@@ -26,7 +26,9 @@ from pipeline.schemas import (
     PlayerPitchPosition,
     ProcessVideoResponse,
     LineAnnotation,
-    AnchorFrameAnnotation
+    AnchorFrameAnnotation,
+    PTZParameters,
+    PTZEstimationResponse,
 )
 # NOTE: `run_tracking` performs heavy ML imports; import lazily inside endpoints to keep module import lightweight.
 # from pipeline.detect import run_tracking
@@ -581,6 +583,184 @@ async def compute_homographies_with_line_constraints(
         "frames": sorted(homographies.keys()),
         "info": info_serialized
     }
+
+
+@app.post("/videos/{video_id}/ptz", response_model=PTZEstimationResponse)
+async def estimate_ptz(
+    video_id: str,
+    anchor_annotation: AnchorFrameAnnotation,
+    start_frame: int = Query(0, ge=0, description="First frame to process"),
+    end_frame: Optional[int] = Query(None, description="Last frame to process (inclusive). Defaults to end of video."),
+    focal_length: Optional[float] = Query(None, description="Camera focal length in pixels. Defaults to max(width, height)."),
+    use_optical_flow_zoom: bool = Query(True, description="Refine zoom estimate with dense optical flow"),
+):
+    """
+    Estimate per-frame PTZ (Pan/Tilt/Zoom) camera parameters and derive
+    per-frame pitch homographies using the PTZ camera model.
+
+    **PTZ Camera Model**
+
+    Instead of requiring keypoint annotations for every anchor frame, this
+    endpoint:
+
+    1. Computes a single anchor-frame homography from the supplied keypoint
+       annotations.
+    2. Estimates **inter-frame homographies** between consecutive frames using
+       ORB feature matching + RANSAC (no user annotations required).
+    3. Decomposes each inter-frame homography into **pan**, **tilt**, and
+       **zoom** deltas using the PTZ camera model
+       ``H = K · R_rel · K⁻¹``.
+    4. Optionally refines the **zoom** estimate for each frame pair using
+       dense Farnebäck optical flow (radially outward flow = zoom in).
+    5. Propagates PTZ states forward and backward from the anchor frame.
+    6. Reconstructs a canonical pitch-canvas homography analytically for
+       every reachable frame.
+
+    The resulting per-frame homographies are stored in the video's homography
+    cache and can be used by the ``/map_players`` and warped-frame endpoints
+    exactly like anchor-based homographies.
+
+    **Parameters**
+
+    - ``anchor_annotation``: keypoints for a single anchor frame (≥ 4 points).
+    - ``start_frame`` / ``end_frame``: clip range to process.
+    - ``focal_length``: approximate camera focal length in pixels
+      (default: ``max(frame_width, frame_height)``).
+    - ``use_optical_flow_zoom``: blend optical-flow zoom with the homography
+      scale estimate for more reliable zoom tracking.
+    """
+    if video_id not in store.videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_info = store.videos[video_id]
+    video_path = video_info["path"]
+    num_frames = video_info["num_frames"]
+
+    # Validate frame range.
+    actual_start = max(0, start_frame)
+    actual_end = (min(num_frames - 1, end_frame) if end_frame is not None
+                  else num_frames - 1)
+    if actual_start > actual_end:
+        raise HTTPException(status_code=400, detail="Invalid frame range")
+
+    # Compute anchor homography from the supplied keypoint annotation.
+    if len(anchor_annotation.points) < 4:
+        raise HTTPException(
+            status_code=400,
+            detail="Anchor annotation requires at least 4 keypoints."
+        )
+
+    anchor_idx = anchor_annotation.frame_idx
+    if not (actual_start <= anchor_idx <= actual_end):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"anchor_annotation.frame_idx ({anchor_idx}) must be within "
+                f"[{actual_start}, {actual_end}]."
+            ),
+        )
+
+    from pipeline.homography import compute_homographies_with_lines
+    ann_dict = {
+        anchor_idx: {
+            "keypoints": anchor_annotation.points,
+            "lines": anchor_annotation.lines,
+        }
+    }
+    try:
+        anchor_homographies, _ = compute_homographies_with_lines(ann_dict)
+    except Exception as e:
+        logger.error(f"Anchor homography failed for video {video_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to compute anchor homography: {e}"
+        )
+
+    if anchor_idx not in anchor_homographies:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not compute anchor homography. Check keypoint annotations."
+        )
+
+    anchor_H = anchor_homographies[anchor_idx]
+
+    # Extract the clip frames from the video.
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise HTTPException(status_code=500, detail="Failed to open video")
+
+    frames: List[np.ndarray] = []
+    cap.set(cv2.CAP_PROP_POS_FRAMES, actual_start)
+    for _ in range(actual_end - actual_start + 1):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+
+    if not frames:
+        raise HTTPException(status_code=500, detail="Failed to read video frames")
+
+    # The anchor frame index within the extracted clip (0-based).
+    anchor_clip_idx = anchor_idx - actual_start
+
+    try:
+        from pipeline.ptz import build_per_frame_homographies
+        per_frame_H, ptz_states = build_per_frame_homographies(
+            frames=frames,
+            anchor_frame_idx=anchor_clip_idx,
+            anchor_H_to_pitch=anchor_H,
+            focal_length=focal_length,
+            use_optical_flow_zoom=use_optical_flow_zoom,
+        )
+    except Exception as e:
+        logger.error(f"PTZ estimation failed for video {video_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PTZ estimation failed: {e}"
+        )
+
+    # Remap clip-relative indices back to absolute video frame indices.
+    homographies_abs: Dict[int, np.ndarray] = {
+        (actual_start + clip_idx): H
+        for clip_idx, H in per_frame_H.items()
+    }
+    ptz_abs = {
+        (actual_start + clip_idx): ptz
+        for clip_idx, ptz in ptz_states.items()
+    }
+
+    # Merge with any existing anchor-based homographies and persist.
+    existing = store.homographies_cache.get(video_id, {})
+    existing.update(homographies_abs)
+    store.homographies_cache[video_id] = existing
+    save_homographies(video_id, existing)
+
+    # Store PTZ states.
+    store.ptz_cache[video_id] = ptz_abs
+
+    ptz_params = [
+        PTZParameters(
+            frame_idx=abs_idx,
+            pan=ptz.pan,
+            tilt=ptz.tilt,
+            zoom=ptz.zoom,
+            source=ptz.source,
+        )
+        for abs_idx, ptz in sorted(ptz_abs.items())
+    ]
+
+    logger.info(
+        f"PTZ estimation complete for video {video_id}: "
+        f"{len(ptz_params)} frames estimated."
+    )
+
+    return PTZEstimationResponse(
+        anchor_frame=anchor_idx,
+        frames_estimated=len(ptz_params),
+        homography_frames=sorted(homographies_abs.keys()),
+        ptz_parameters=ptz_params,
+    )
 
 
 @app.get("/line-constraints/available-lines")

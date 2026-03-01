@@ -233,3 +233,90 @@ def test_process_video_with_trim_params(client, monkeypatch, sample_annotations,
     body = resp.json()
     assert body["status"] == "completed"
 
+
+def test_ptz_endpoint(client, monkeypatch, sample_video_metadata, sample_anchor_frame_annotations):
+    """Test the PTZ estimation endpoint returns expected structure."""
+    import numpy as np
+    from pipeline.ptz import PTZState
+
+    # Upload a fake video.
+    fake_file = BytesIO(b"fake mp4 data")
+    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
+    assert r.status_code == 200
+    vid = r.json()["video_id"]
+
+    # Mock cv2.VideoCapture so we don't need a real video file.
+    fake_frame = np.zeros((64, 64, 3), dtype=np.uint8)
+
+    class FakeCapture:
+        def __init__(self, *args, **kwargs):
+            self._frame_count = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, prop, value):
+            pass
+
+        def read(self):
+            self._frame_count += 1
+            if self._frame_count <= 5:
+                return True, fake_frame.copy()
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr("cv2.VideoCapture", FakeCapture)
+
+    # Mock build_per_frame_homographies to return lightweight results.
+    anchor_H = np.eye(3, dtype=np.float64)
+    dummy_ptz = {
+        0: PTZState(frame_idx=0, source="anchor"),
+        1: PTZState(frame_idx=1, pan=0.01, tilt=0.0, zoom=1.01, source="homography_decomp"),
+    }
+    dummy_H = {0: anchor_H, 1: anchor_H}
+    monkeypatch.setattr(
+        "pipeline.ptz.build_per_frame_homographies",
+        lambda **kwargs: (dummy_H, dummy_ptz),
+    )
+
+    ann = sample_anchor_frame_annotations[0]
+    payload = ann.model_dump() if hasattr(ann, "model_dump") else ann.dict()
+
+    resp = client.post(
+        f"/videos/{vid}/ptz?start_frame=0&end_frame=4&use_optical_flow_zoom=false",
+        json=payload,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "anchor_frame" in body
+    assert "frames_estimated" in body
+    assert "homography_frames" in body
+    assert "ptz_parameters" in body
+    assert body["anchor_frame"] == 0
+    assert len(body["ptz_parameters"]) >= 1
+    # Verify each PTZ parameter has the required fields.
+    for p in body["ptz_parameters"]:
+        assert "frame_idx" in p
+        assert "pan" in p
+        assert "tilt" in p
+        assert "zoom" in p
+        assert "source" in p
+
+
+def test_ptz_endpoint_video_not_found(client):
+    """PTZ endpoint returns 404 for unknown video."""
+    payload = {
+        "frame_idx": 0,
+        "points": [
+            {"pitch_id": "corner_tl", "x_img": 0, "y_img": 0},
+            {"pitch_id": "corner_tr", "x_img": 400, "y_img": 0},
+            {"pitch_id": "corner_bl", "x_img": 0, "y_img": 800},
+            {"pitch_id": "corner_br", "x_img": 400, "y_img": 800},
+        ],
+        "lines": [],
+    }
+    resp = client.post("/videos/nonexistent-video-id/ptz", json=payload)
+    assert resp.status_code == 404
+

@@ -117,3 +117,52 @@ class HomographyWithLinesResponse(BaseModel):
     """Response for line-constrained homography computation."""
     frames: List[int]
     info: Dict[str, dict] = {}  # Frame index (as string) -> computation info
+
+
+class PTZParameters(BaseModel):
+    """PTZ camera parameters for a single video frame.
+
+    Attributes
+    ----------
+    frame_idx : int
+        Zero-based video frame index.
+    pan : float
+        Horizontal rotation in radians relative to the anchor frame.
+        Positive = camera panned right.
+    tilt : float
+        Vertical rotation in radians relative to the anchor frame.
+        Positive = camera tilted up.
+    zoom : float
+        Zoom scale factor relative to the anchor frame.
+        Values > 1 indicate a tighter (zoomed-in) field of view.
+    source : str
+        Estimation method: ``"anchor"``, ``"homography_decomp"``, or
+        ``"optical_flow"``.
+    """
+
+    frame_idx: int
+    pan: float
+    tilt: float
+    zoom: float
+    source: str
+
+
+class PTZEstimationResponse(BaseModel):
+    """Response after running PTZ estimation on a video clip.
+
+    Attributes
+    ----------
+    anchor_frame : int
+        Frame index used as the PTZ reference (pan=0, tilt=0, zoom=1).
+    frames_estimated : int
+        Number of frames for which PTZ parameters were successfully estimated.
+    homography_frames : List[int]
+        Frame indices for which a pitch-canvas homography was reconstructed.
+    ptz_parameters : List[PTZParameters]
+        Per-frame PTZ states, ordered by frame index.
+    """
+
+    anchor_frame: int
+    frames_estimated: int
+    homography_frames: List[int]
+    ptz_parameters: List[PTZParameters]
