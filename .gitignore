@@ -12,6 +12,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!Interactive_analytics_system_frontend/lib/
 parts/
 sdist/
 var/

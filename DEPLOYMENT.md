@@ -7,7 +7,7 @@ This guide explains how to deploy the GAA Video Analysis System to Render (backe
 ```
 GAA-Video-Analysis/
 ├── interactive_analytics_system_backend/    # FastAPI backend (Render)
-├── Interactive_analytics_system_frontend/   # Next.js frontend (Vercel)
+├── interactive_analytics_system_frontend/   # Next.js frontend (Vercel)
 └── pipeline_testing_and_research/          # Ignore this folder
 ```
 
@@ -52,7 +52,7 @@ GAA-Video-Analysis/
 
 1. **Import Project on Vercel**
    - Connect your GitHub repository
-   - Select the `Interactive_analytics_system_frontend` folder as the root directory
+   - Select the `interactive_analytics_system_frontend` folder as the root directory
    - Framework Preset: Next.js (auto-detected)
 
 2. **Set Environment Variables**
@@ -78,7 +78,7 @@ uvicorn app:app --reload --port 8000
 
 ### Frontend
 ```bash
-cd Interactive_analytics_system_frontend
+cd interactive_analytics_system_frontend
 npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```

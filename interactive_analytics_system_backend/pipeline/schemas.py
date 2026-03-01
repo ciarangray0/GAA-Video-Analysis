@@ -1,6 +1,6 @@
 """Pydantic schemas for API requests and responses."""
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class PitchPoint(BaseModel):
@@ -111,3 +111,9 @@ class ProcessVideoResponse(BaseModel):
     start_frame: Optional[int] = None  # First frame processed
     end_frame: Optional[int] = None  # Last frame processed
     fps: Optional[float] = None  # Video FPS for playback
+
+
+class HomographyWithLinesResponse(BaseModel):
+    """Response for line-constrained homography computation."""
+    frames: List[int]
+    info: Dict[str, dict] = {}  # Frame index (as string) -> computation info
