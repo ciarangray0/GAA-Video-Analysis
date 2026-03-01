@@ -27,9 +27,9 @@ from pipeline.config import OUT_W, OUT_H, K1
 def map_players_to_pitch(
     detections: List[Detection],
     homographies: Dict[int, np.ndarray],
-    out_w: int = None,
-    out_h: int = None,
-    k1: float = None
+    out_w: int = OUT_W,
+    out_h: int = OUT_H,
+    k1: float = K1
 ) -> List[PlayerPitchPosition]:
     """
     Map player detections to pitch canvas coordinates.
@@ -54,13 +54,6 @@ def map_players_to_pitch(
         List of PlayerPitchPosition objects with source="homography"
         Coordinates (x_pitch, y_pitch) are in PITCH CANVAS PIXELS
     """
-    if out_w is None:
-        out_w = OUT_W
-    if out_h is None:
-        out_h = OUT_H
-    if k1 is None:
-        k1 = K1
-
     if not homographies:
         return []
 
