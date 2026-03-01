@@ -36,7 +36,7 @@ def identity_H():
 
 @pytest.fixture
 def simple_frame():
-    """A 100x100 greyscale gradient frame for optical flow tests."""
+    """A 100x100 grayscale gradient frame for optical flow tests."""
     rng = np.random.default_rng(42)
     return rng.integers(0, 255, (100, 100, 3), dtype=np.uint8)
 

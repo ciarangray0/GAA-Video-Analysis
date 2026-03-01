@@ -560,21 +560,9 @@ def build_per_frame_homographies(
         focal_length = float(max(w, h))
 
     # Step 1 – estimate inter-frame homographies (frame i-1 → frame i).
-    inter_frame_H: Dict[int, np.ndarray] = {}
-    for i in range(1, len(frames)):
-        H_inter = estimate_inter_frame_homography(frames[i - 1], frames[i])
-        if H_inter is not None:
-            inter_frame_H[anchor_frame_idx - len(frames) + 1 + i] = H_inter
-
-    # Re-index so that keys match absolute frame indices.
-    # ``frames[0]`` corresponds to some absolute index; we store H mapping
-    # frames[i-1] → frames[i] under key = anchor_frame_idx + (i - <anchor pos>).
-    # Recalculate with correct absolute indices.
+    # Convention: frames[j] has clip-relative index j (0-based).
+    # H under key i maps frames[i-1] → frames[i].
     inter_frame_H_abs: Dict[int, np.ndarray] = {}
-    # Determine the absolute index of frames[0].
-    # We do not know it from this function; caller provides anchor_frame_idx
-    # and frames should start from frame 0 of the clip.
-    # Convention: frames[j] has absolute index j (caller passes a full clip).
     for i in range(1, len(frames)):
         H_inter = estimate_inter_frame_homography(frames[i - 1], frames[i])
         if H_inter is not None:
