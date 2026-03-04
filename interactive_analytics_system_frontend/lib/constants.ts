@@ -7,6 +7,7 @@ export const GAA_PITCH_WIDTH = 85.0
 export const GAA_PITCH_LENGTH = 140.0
 
 export const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }> = {
+  'endline_top': { label: 'End Line (Top)', y_meters: 0.0 },
   '13m_top': { label: '13m Line (Top)', y_meters: 13.0 },
   '20m_top': { label: '20m Line (Top)', y_meters: 20.0 },
   '45m_top': { label: '45m Line (Top)', y_meters: 45.0 },
@@ -16,6 +17,7 @@ export const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }
   '45m_bottom': { label: '45m Line (Bottom)', y_meters: 95.0 },
   '20m_bottom': { label: '20m Line (Bottom)', y_meters: 120.0 },
   '13m_bottom': { label: '13m Line (Bottom)', y_meters: 127.0 },
+  'endline_bottom': { label: 'End Line (Bottom)', y_meters: 140.0 },
 }
 
 export const GAA_PITCH_VERTICES: Record<string, [number, number]> = {

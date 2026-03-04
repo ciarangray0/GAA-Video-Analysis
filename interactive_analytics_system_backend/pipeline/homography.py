@@ -300,7 +300,9 @@ def compute_homographies_with_lines(
                 line_dicts,
                 num_samples_per_line=num_samples_per_line,
                 max_iterations=max_iterations,
-                keypoint_weight=keypoint_weight
+                keypoint_weight=keypoint_weight,
+                prefer_line_pts_for_init=True,
+                min_line_pts_for_init=4,
             )
             homographies[frame_idx] = H
             computation_info[frame_idx] = info
