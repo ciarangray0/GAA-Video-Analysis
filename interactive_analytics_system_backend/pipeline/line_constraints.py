@@ -348,7 +348,9 @@ def compute_line_constrained_homography(
     max_iterations: int = 3,
     keypoint_weight: int = 3,
     validate_lines: bool = True,
-    ransac_threshold: float = 5.0
+    ransac_threshold: float = 5.0,
+    prefer_line_pts_for_init: bool = True,
+    min_line_pts_for_init: int = 4,
 ) -> Tuple[np.ndarray, dict]:
     """
     Compute homography using both keypoint and line constraints.
@@ -415,18 +417,51 @@ def compute_line_constrained_homography(
         'line_warnings': [],
         'synthetic_points': 0,
         'converged': False,
+        'used_line_pts_for_init': False,
     }
 
-    # Step 1: Compute initial homography from keypoints only
-    H_current, mask = cv2.findHomography(
-        pts_image_keypoints,
-        pts_canvas_keypoints,
-        cv2.RANSAC,
-        ransac_threshold
-    )
+    # ── Step 1: compute initial H ─────────────────────────────────────────────
+    H_current = None
 
+    if prefer_line_pts_for_init:
+        known_line_ys = set(
+            round(y_m / 140.0 * 1400)
+            for y_m in GAA_PITCH_LINES.values()
+        )
+        line_pt_mask = np.zeros(len(pts_canvas_keypoints), dtype=bool)
+        for i, (cx, cy) in enumerate(pts_canvas_keypoints):
+            for known_y in known_line_ys:
+                if abs(cy - known_y) < 3.0:
+                    line_pt_mask[i] = True
+                    break
+
+        line_pts_img    = pts_image_keypoints[line_pt_mask]
+        line_pts_canvas = pts_canvas_keypoints[line_pt_mask]
+
+        if len(line_pts_img) >= min_line_pts_for_init:
+            H_init, mask_init = cv2.findHomography(
+                line_pts_img, line_pts_canvas, cv2.RANSAC, ransac_threshold
+            )
+            if H_init is not None and mask_init is not None:
+                n_inliers = int(mask_init.sum())
+                if n_inliers >= 4:
+                    H_current = H_init
+                    info['used_line_pts_for_init'] = True
+                    info['line_warnings'].append(
+                        f"Initial H computed from {n_inliers}/{len(line_pts_img)} "
+                        f"line_ exact points (prefer_line_pts_for_init=True)"
+                    )
+
+    # Fall back to all keypoints if line_ init failed or wasn't attempted
     if H_current is None:
-        raise ValueError("Failed to compute initial homography from keypoints")
+        H_current, mask = cv2.findHomography(
+            pts_image_keypoints,
+            pts_canvas_keypoints,
+            cv2.RANSAC,
+            ransac_threshold
+        )
+        if H_current is None:
+            raise ValueError("Failed to compute initial homography from keypoints")
 
     # If no line annotations, return initial homography
     if not line_annotations:
@@ -482,10 +517,11 @@ def compute_line_constrained_homography(
 
         info['synthetic_points'] = len(pts_image_synthetic)
 
-        # Weight keypoints by duplication
-        # This gives keypoints higher influence than synthetic line points
-        pts_image_weighted = np.vstack([pts_image_keypoints] * keypoint_weight)
-        pts_canvas_weighted = np.vstack([pts_canvas_keypoints] * keypoint_weight)
+        # When initial H came from line_ points, reduce keypoint weight
+        # so noisy named vertices don't pull H back toward the wrong solution
+        effective_weight = 1 if info['used_line_pts_for_init'] else keypoint_weight
+        pts_image_weighted  = np.vstack([pts_image_keypoints]  * effective_weight)
+        pts_canvas_weighted = np.vstack([pts_canvas_keypoints] * effective_weight)
 
         # Combine all points: weighted keypoints + synthetic line points
         all_pts_image = np.vstack([pts_image_weighted, pts_image_synthetic])
