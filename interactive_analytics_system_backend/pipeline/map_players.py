@@ -9,7 +9,7 @@ Coordinate System:
 - Input: Image pixels (camera frame from video)
 - Output: Pitch canvas pixels (e.g., 850 × 1400 fixed canvas)
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import numpy as np
 
 from pipeline.schemas import Detection, PlayerPitchPosition
@@ -24,6 +24,7 @@ def map_players_to_pitch(
     out_h: int = OUT_H,
     k1: float = K1,
     use_nearest_anchor: bool = False,
+    anchor_frame_indices: Optional[Set[int]] = None,
 ) -> List[PlayerPitchPosition]:
     """
     Map player detections to pitch canvas coordinates.
@@ -39,23 +40,25 @@ def map_players_to_pitch(
         Equivalent to the original implementation but without skipping.
 
     Args:
-        detections:          List of Detection objects from YOLO+ByteTrack
-        homographies:        Dict mapping frame_idx → 3x3 H matrix
-        out_w:               Pitch canvas width in pixels
-        out_h:               Pitch canvas height in pixels
-        k1:                  Radial distortion coefficient
-        use_nearest_anchor:  If True, use nearest anchor H for unmapped frames
+        detections:           List of Detection objects from YOLO+ByteTrack
+        homographies:         Dict mapping frame_idx → 3x3 H matrix
+        out_w:                Pitch canvas width in pixels
+        out_h:                Pitch canvas height in pixels
+        k1:                   Radial distortion coefficient
+        use_nearest_anchor:   If True, use nearest anchor H for unmapped frames
+        anchor_frame_indices: Optional set of frame indices that are true anchor
+                              frames (not ORB-propagated). Used for source labelling.
 
     Returns:
         List of PlayerPitchPosition objects.
-        source="homography"        — mapped using exact frame H
+        source="homography"        — mapped using exact anchor frame H
         source="homography_interp" — mapped using interpolated/propagated H
         source="homography_anchor" — mapped using nearest anchor H (legacy)
     """
     if not homographies:
         return []
 
-    anchor_frames_sorted = sorted(homographies.keys())
+    all_frames_sorted = sorted(homographies.keys())
     positions = []
 
     for det in detections:
@@ -67,14 +70,16 @@ def map_players_to_pitch(
                 # Per-frame H dict should cover all frames — if missing, skip
                 continue
             # Legacy fallback: nearest anchor
-            nearest = min(anchor_frames_sorted, key=lambda a: abs(a - det.frame_idx))
+            nearest = min(all_frames_sorted, key=lambda a: abs(a - det.frame_idx))
             H = homographies[nearest]
             source = "homography_anchor"
         else:
-            # If this frame is not one of the original anchor frames,
-            # it came from propagation
-            if det.frame_idx not in anchor_frames_sorted:
-                source = "homography_interp"
+            # If anchor_frame_indices is provided, use it to determine source.
+            # Otherwise treat all frames as anchor (legacy behaviour).
+            if anchor_frame_indices is not None:
+                if det.frame_idx not in anchor_frame_indices:
+                    source = "homography_interp"
+            # If anchor_frame_indices is None, source stays "homography"
 
         x_center = (det.x1 + det.x2) / 2
         y_bottom = det.y2

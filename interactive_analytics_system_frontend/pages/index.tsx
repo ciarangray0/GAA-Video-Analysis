@@ -18,7 +18,7 @@ export default function Home() {
   const [currentAnchorIdx, setCurrentAnchorIdx] = useState(0)
 
   const [stepAResult, setStepAResult] = useState<{ frames_processed: number; tracks: number; num_detections: number } | null>(null)
-  const [stepBResult, setStepBResult] = useState<{ frames: number[]; info: Record<string, any> } | null>(null)
+  const [stepBResult, setStepBResult] = useState<{ frames: number[]; per_frame_count: number; info: Record<string, any> } | null>(null)
   const [stepCResult, setStepCResult] = useState<{ positions: PlayerPosition[]; total: number } | null>(null)
   const [stepDResult, setStepDResult] = useState<{ frames_generated: number; method: string } | null>(null)
   const [staleSteps, setStaleSteps] = useState<Set<string>>(new Set())

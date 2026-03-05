@@ -4,6 +4,33 @@ import { drawPitch } from '../lib/pitch'
 import { PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H } from '../lib/constants'
 import { API_URL } from '../lib/api'
 
+// ---- Anchor Quality types ----
+interface KeypointQuality {
+  pitch_id: string
+  x_img: number
+  y_img: number
+  error_px: number
+  verdict: 'good' | 'high' | 'outlier'
+  impact: 'helpful' | 'marginal' | 'harmful'
+}
+
+interface AnchorQualityEntry {
+  frame_idx: number
+  n_keypoints: number
+  n_lines: number
+  mean_error_px: number
+  max_error_px: number
+  n_outlier_points: number
+  n_helpful_points: number
+  overall_quality: 'good' | 'warning' | 'bad'
+  keypoints: KeypointQuality[]
+  recommendation: string
+}
+
+interface AnchorQualityReport {
+  anchors: AnchorQualityEntry[]
+}
+
 interface ResultsViewerProps {
   videoMetadata: VideoMetadata
   videoFile: File
@@ -38,6 +65,13 @@ export default function ResultsViewer({
   const [loadingWarpedFrame, setLoadingWarpedFrame] = useState(false)
   const [showBotSortOverlay, setShowBotSortOverlay] = useState(false)
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null)
+
+  // Debug panel state
+  const [showMappingView, setShowMappingView] = useState(false)
+  const [anchorQuality, setAnchorQuality] = useState<AnchorQualityReport | null>(null)
+  const [loadingAnchorQuality, setLoadingAnchorQuality] = useState(false)
+  const [anchorQualityError, setAnchorQualityError] = useState<string | null>(null)
+  const [expandedAnchorRows, setExpandedAnchorRows] = useState<Set<number>>(new Set())
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoPlayerRef = useRef<HTMLVideoElement>(null)
@@ -190,6 +224,34 @@ export default function ResultsViewer({
     }
     return anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4)
   }, [anchorFrames, homographyFrameIndices])
+
+  const fetchAnchorQuality = useCallback(async () => {
+    if (anchorQuality || loadingAnchorQuality) return
+    setLoadingAnchorQuality(true)
+    setAnchorQualityError(null)
+    try {
+      const res = await fetch(`${API_URL}/videos/${videoMetadata.video_id}/homographies/anchor-quality`)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to load anchor quality')
+      }
+      const data: AnchorQualityReport = await res.json()
+      setAnchorQuality(data)
+    } catch (e: any) {
+      setAnchorQualityError(e.message || 'Failed to load anchor quality')
+    } finally {
+      setLoadingAnchorQuality(false)
+    }
+  }, [anchorQuality, loadingAnchorQuality, videoMetadata.video_id])
+
+  const toggleAnchorRow = useCallback((frameIdx: number) => {
+    setExpandedAnchorRows(prev => {
+      const next = new Set(prev)
+      if (next.has(frameIdx)) next.delete(frameIdx)
+      else next.add(frameIdx)
+      return next
+    })
+  }, [])
 
   const getPointLabel = (id: string): string =>
     id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
@@ -433,6 +495,108 @@ export default function ResultsViewer({
           ).length}</span>
         </div>
       </div>
+
+      {/* Mapping View debug panel */}
+      <details className="debug-panel" onToggle={(e) => setShowMappingView((e.target as HTMLDetailsElement).open)}>
+        <summary>🗺️ Mapping View</summary>
+        {showMappingView && (
+          <div className="debug-panel-body">
+            <p className="debug-info">
+              Frame {currentFrame} —{' '}
+              {homographyFrameIndices.includes(currentFrame)
+                ? <strong style={{ color: 'green' }}>anchor frame</strong>
+                : <span style={{ color: '#888' }}>propagated frame</span>}
+            </p>
+            <div style={{ width: 425, height: 300, overflow: 'hidden', border: '1px solid #ccc', borderRadius: 4 }}>
+              <img
+                key={currentFrame}
+                src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/warped_with_lines`}
+                alt={`Warped frame ${currentFrame} with pitch lines`}
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+              />
+            </div>
+          </div>
+        )}
+      </details>
+
+      {/* Anchor Quality debug panel */}
+      <details
+        className="debug-panel"
+        onToggle={(e) => {
+          if ((e.target as HTMLDetailsElement).open) fetchAnchorQuality()
+        }}
+      >
+        <summary>📐 Anchor Quality</summary>
+        <div className="debug-panel-body">
+          {loadingAnchorQuality && <p className="debug-info">Loading anchor quality…</p>}
+          {anchorQualityError && <p className="debug-info" style={{ color: 'red' }}>{anchorQualityError}</p>}
+          {anchorQuality && !loadingAnchorQuality && (
+            <table className="debug-table">
+              <thead>
+                <tr>
+                  <th>Frame</th><th>Keypoints</th><th>Lines</th>
+                  <th>Mean Err</th><th>Max Err</th><th>Outliers</th><th>Quality</th>
+                </tr>
+              </thead>
+              <tbody>
+                {anchorQuality.anchors.map(a => (
+                  <>
+                    <tr
+                      key={a.frame_idx}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => toggleAnchorRow(a.frame_idx)}
+                    >
+                      <td>{a.frame_idx} {expandedAnchorRows.has(a.frame_idx) ? '▲' : '▼'}</td>
+                      <td>{a.n_keypoints}</td>
+                      <td>{a.n_lines}</td>
+                      <td>{a.mean_error_px.toFixed(1)}px</td>
+                      <td>{a.max_error_px.toFixed(1)}px</td>
+                      <td>{a.n_outlier_points}</td>
+                      <td style={{
+                        color: a.overall_quality === 'good' ? 'green'
+                          : a.overall_quality === 'warning' ? '#b8860b'
+                          : 'red',
+                        fontWeight: 'bold'
+                      }}>
+                        {a.overall_quality}
+                      </td>
+                    </tr>
+                    {expandedAnchorRows.has(a.frame_idx) && (
+                      <tr key={`${a.frame_idx}-detail`}>
+                        <td colSpan={7}>
+                          <p style={{ margin: '4px 0', fontStyle: 'italic' }}>{a.recommendation}</p>
+                          <table className="debug-table" style={{ marginBottom: 4 }}>
+                            <thead>
+                              <tr><th>Pitch ID</th><th>x_img</th><th>y_img</th><th>Error</th><th>Verdict</th><th>Impact</th></tr>
+                            </thead>
+                            <tbody>
+                              {a.keypoints.map((kp, ki) => (
+                                <tr key={ki} style={{
+                                  color: kp.verdict === 'outlier' ? 'red'
+                                    : kp.verdict === 'high' ? '#b8860b'
+                                    : 'inherit'
+                                }}>
+                                  <td>{kp.pitch_id}</td>
+                                  <td>{kp.x_img.toFixed(0)}</td>
+                                  <td>{kp.y_img.toFixed(0)}</td>
+                                  <td>{kp.error_px.toFixed(1)}px</td>
+                                  <td>{kp.verdict}</td>
+                                  <td>{kp.impact}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </details>
     </div>
   )
 }

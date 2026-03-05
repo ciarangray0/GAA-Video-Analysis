@@ -1,9 +1,10 @@
 """FastAPI application for video analysis pipeline."""
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import json
 import cv2
 import numpy as np
@@ -30,10 +31,12 @@ from pipeline.schemas import (
 )
 # NOTE: `run_tracking` performs heavy ML imports; import lazily inside endpoints to keep module import lightweight.
 # from pipeline.detect import run_tracking
-from pipeline.homography import compute_homographies_from_annotations, compute_homographies_with_lines
+from pipeline.homography import compute_homographies_from_annotations, compute_homographies_with_lines, resolve_pitch_coordinates
+from pipeline.constrained_homography import build_constrained_per_frame_H
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
+from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
 from store import store
 
 # Configure logging
@@ -138,6 +141,65 @@ def load_homographies(video_id: str) -> Optional[Dict[int, any]]:
         with open(file_path, "r") as f:
             data = json.load(f)
             return {int(k): np.array(v) for k, v in data.items()}
+    return None
+
+
+def save_anchor_homographies(video_id: str, homographies: Dict[int, Any]):
+    """Save anchor homographies to a separate JSON file."""
+    file_path = ANNOTATIONS_DIR / f"{video_id}_anchor_homographies.json"
+    homographies_serialized = {
+        str(k): v.tolist() for k, v in homographies.items()
+    }
+    with open(file_path, "w") as f:
+        json.dump(homographies_serialized, f, indent=2)
+
+
+def load_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
+    """Load anchor homographies from JSON file."""
+    file_path = ANNOTATIONS_DIR / f"{video_id}_anchor_homographies.json"
+    if file_path.exists():
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            return {int(k): np.array(v) for k, v in data.items()}
+    return None
+
+
+def save_annotations(video_id: str, annotations_dict: dict):
+    """Save raw annotations to JSON file for quality reporting."""
+    file_path = ANNOTATIONS_DIR / f"{video_id}_annotations.json"
+    # Convert PitchPoint / LineAnnotation objects to serialisable dicts
+    serialisable: dict = {}
+    for frame_idx, ann in annotations_dict.items():
+        keypoints = ann.get("keypoints", [])
+        lines = ann.get("lines", [])
+        kp_list = []
+        for p in keypoints:
+            if hasattr(p, "model_dump"):
+                kp_list.append(p.model_dump())
+            elif hasattr(p, "dict"):
+                kp_list.append(p.dict())
+            else:
+                kp_list.append(p)
+        ln_list = []
+        for ln in lines:
+            if hasattr(ln, "model_dump"):
+                ln_list.append(ln.model_dump())
+            elif hasattr(ln, "dict"):
+                ln_list.append(ln.dict())
+            else:
+                ln_list.append(ln)
+        serialisable[str(frame_idx)] = {"keypoints": kp_list, "lines": ln_list}
+    with open(file_path, "w") as f:
+        json.dump(serialisable, f, indent=2)
+
+
+def load_annotations(video_id: str) -> Optional[dict]:
+    """Load raw annotations from JSON file."""
+    file_path = ANNOTATIONS_DIR / f"{video_id}_annotations.json"
+    if file_path.exists():
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            return {int(k): v for k, v in data.items()}
     return None
 
 
@@ -547,30 +609,52 @@ async def compute_homographies_with_line_constraints(
         for ann in annotations
     }
 
-    # Compute with line constraints
+    # Compute anchor homographies with line constraints
     try:
-        homographies, computation_info = compute_homographies_with_lines(
+        anchor_homographies, computation_info = compute_homographies_with_lines(
             annotations_dict,
             num_samples_per_line=num_samples_per_line,
             max_iterations=max_iterations,
             keypoint_weight=keypoint_weight
         )
-        store.homographies_cache[video_id] = homographies
-        save_homographies(video_id, homographies)
     except Exception as e:
         logger.error(f"Line-constrained homography computation failed for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Homography computation failed: {str(e)}")
 
-    if not homographies:
+    if not anchor_homographies:
         raise HTTPException(
             status_code=400,
             detail="No valid homographies computed. Need at least 4 keypoints per frame."
         )
 
+    # Save anchor homographies separately
+    store.anchor_homographies_cache[video_id] = anchor_homographies
+    save_anchor_homographies(video_id, anchor_homographies)
+
+    # Save raw annotations for quality reporting
+    save_annotations(video_id, annotations_dict)
+
+    # Propagate to every frame using ORB forward composition
+    video_info = store.videos[video_id]
+    video_path = video_info["path"]
+    num_frames = video_info["num_frames"]
+    try:
+        per_frame_hs, _analysis = build_constrained_per_frame_H(
+            video_path, anchor_homographies, start_frame=0, end_frame=num_frames - 1
+        )
+    except Exception as e:
+        logger.error(f"Per-frame H propagation failed for video {video_id}: {e}")
+        # Fall back to anchor-only homographies
+        per_frame_hs = anchor_homographies
+
+    store.homographies_cache[video_id] = per_frame_hs
+    save_homographies(video_id, per_frame_hs)
+
     # Log summary
     total_lines_used = sum(info.get('valid_lines', 0) for info in computation_info.values())
     logger.info(
-        f"Computed {len(homographies)} homographies for video {video_id} "
+        f"Computed {len(anchor_homographies)} anchor homographies + "
+        f"{len(per_frame_hs)} per-frame Hs for video {video_id} "
         f"using {total_lines_used} line constraints total"
     )
 
@@ -578,7 +662,8 @@ async def compute_homographies_with_line_constraints(
     info_serialized = {str(k): v for k, v in computation_info.items()}
 
     return {
-        "frames": sorted(homographies.keys()),
+        "frames": sorted(anchor_homographies.keys()),
+        "per_frame_count": len(per_frame_hs),
         "info": info_serialized
     }
 
@@ -622,14 +707,20 @@ async def map_players(video_id: str):
     if detections is None:
         raise HTTPException(status_code=400, detail="No detections found. Run tracking first.")
     
-    # Load homographies
+    # Load per-frame homographies
     homographies = load_homographies(video_id)
     if homographies is None:
         raise HTTPException(status_code=400, detail="No homographies found. Compute homographies first.")
-    
+
+    # Load anchor homographies to determine which frames are true anchors
+    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
+
     # Map players to pitch
     try:
-        positions = map_players_to_pitch(detections, homographies)
+        positions = map_players_to_pitch(
+            detections, homographies, anchor_frame_indices=anchor_frame_indices
+        )
         store.player_positions_cache[video_id] = positions
     except Exception as e:
         logger.error(f"Player mapping failed for video {video_id}: {e}")
@@ -638,6 +729,199 @@ async def map_players(video_id: str):
     logger.info(f"Mapped {len(positions)} player positions for video {video_id}")
 
     return positions
+
+
+# Pitch canvas dimensions (10px per metre)
+_PITCH_CANVAS_W = OUT_W   # 850
+_PITCH_CANVAS_H = OUT_H   # 1400
+_PITCH_METERS_W = 85.0
+_PITCH_METERS_H = 140.0
+
+# Reference lines for the warped_with_lines overlay
+_REFERENCE_LINES = [
+    ("13m",     13.0,  (0, 200, 255)),   # amber
+    ("20m",     20.0,  (0, 255, 0)),     # green
+    ("45m",     45.0,  (255, 128, 0)),   # blue-ish
+    ("65m",     65.0,  (128, 0, 255)),   # purple
+    ("halfway", 70.0,  (255, 255, 0)),   # cyan
+]
+
+
+@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_lines")
+async def get_warped_frame_with_lines(video_id: str, frame_idx: int):
+    """
+    Return a warped JPEG for the given frame with horizontal pitch reference lines
+    (13m, 20m, 45m, 65m, halfway) overlaid as dashed coloured lines on the canvas.
+    """
+    if video_id not in store.videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    H, _nearest = find_nearest_homography(video_id, frame_idx)
+    if H is None:
+        raise HTTPException(status_code=400, detail="No homographies computed for this video")
+
+    video_info = store.videos[video_id]
+    try:
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+
+        # Draw dashed horizontal reference lines
+        for label, y_m, colour in _REFERENCE_LINES:
+            y_px = int(y_m / _PITCH_METERS_H * _PITCH_CANVAS_H)
+            # Dashed line: alternate 20-px drawn / 20-px gap segments
+            x = 0
+            dash_len = 20
+            while x < _PITCH_CANVAS_W:
+                x_end = min(x + dash_len, _PITCH_CANVAS_W)
+                cv2.line(warped, (x, y_px), (x_end, y_px), colour, 2)
+                x += dash_len * 2
+            # Label
+            cv2.putText(
+                warped, label,
+                (4, y_px - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                colour, 1, cv2.LINE_AA
+            )
+
+        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return Response(
+            content=buffer.tobytes(),
+            media_type="image/jpeg",
+            headers={"Cache-Control": "max-age=300"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed warped_with_lines {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
+
+
+@app.get("/videos/{video_id}/homographies/anchor-quality")
+async def get_anchor_quality(video_id: str):
+    """
+    Compute per-keypoint reprojection error for each anchor frame and return
+    a quality report.
+
+    Requires that /homographies/v2 has been called first (which saves the raw
+    annotations and anchor homographies to disk).
+    """
+    if video_id not in store.videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    annotations = load_annotations(video_id)
+    if annotations is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No annotations found. Compute homographies (v2) first."
+        )
+
+    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    if not anchor_hs:
+        raise HTTPException(
+            status_code=400,
+            detail="No anchor homographies found. Compute homographies (v2) first."
+        )
+
+    def _to_canvas(pitch_id: str):
+        x_m, y_m = resolve_pitch_coordinates(pitch_id)
+        return (
+            x_m / _PITCH_METERS_W * _PITCH_CANVAS_W,
+            y_m / _PITCH_METERS_H * _PITCH_CANVAS_H,
+        )
+
+    anchors = []
+    for frame_idx in sorted(anchor_hs.keys()):
+        H = anchor_hs[frame_idx]
+        ann = annotations.get(frame_idx, {})
+        keypoints_raw = ann.get("keypoints", [])
+        lines_raw = ann.get("lines", [])
+
+        kp_results = []
+        for kp in keypoints_raw:
+            if isinstance(kp, dict):
+                pitch_id = kp.get("pitch_id", "")
+                x_img = float(kp.get("x_img", 0))
+                y_img = float(kp.get("y_img", 0))
+            else:
+                pitch_id = getattr(kp, "pitch_id", "")
+                x_img = float(getattr(kp, "x_img", 0))
+                y_img = float(getattr(kp, "y_img", 0))
+
+            # Project image point through H → predicted canvas coords
+            p = np.array([x_img, y_img, 1.0], dtype=np.float64)
+            projected = H @ p
+            if abs(projected[2]) > 1e-12:
+                projected /= projected[2]
+            x_pred, y_pred = float(projected[0]), float(projected[1])
+
+            # Expected canvas coords from pitch_id
+            try:
+                x_exp, y_exp = _to_canvas(pitch_id)
+            except ValueError:
+                continue
+
+            error_px = float(np.sqrt((x_pred - x_exp) ** 2 + (y_pred - y_exp) ** 2))
+
+            if error_px > 30:
+                verdict, impact = "outlier", "harmful"
+            elif error_px > 15:
+                verdict, impact = "high", "marginal"
+            else:
+                verdict, impact = "good", "helpful"
+
+            kp_results.append({
+                "pitch_id": pitch_id,
+                "x_img": x_img,
+                "y_img": y_img,
+                "error_px": round(error_px, 2),
+                "verdict": verdict,
+                "impact": impact,
+            })
+
+        if not kp_results:
+            continue
+
+        errors = [kp["error_px"] for kp in kp_results]
+        mean_err = float(np.mean(errors))
+        max_err = float(np.max(errors))
+        n_outliers = sum(1 for kp in kp_results if kp["verdict"] == "outlier")
+        n_helpful = sum(1 for kp in kp_results if kp["impact"] == "helpful")
+
+        if n_outliers > 0 or mean_err > 30:
+            overall = "bad"
+        elif mean_err > 15:
+            overall = "warning"
+        else:
+            overall = "good"
+
+        if n_outliers > 0:
+            recommendation = f"Remove or re-annotate {n_outliers} outlier point(s) listed above."
+        elif overall == "warning":
+            recommendation = "Consider improving marginal keypoints for better accuracy."
+        else:
+            recommendation = "Homography quality looks good."
+
+        anchors.append({
+            "frame_idx": frame_idx,
+            "n_keypoints": len(kp_results),
+            "n_lines": len(lines_raw),
+            "mean_error_px": round(mean_err, 2),
+            "max_error_px": round(max_err, 2),
+            "n_outlier_points": n_outliers,
+            "n_helpful_points": n_helpful,
+            "overall_quality": overall,
+            "keypoints": kp_results,
+            "recommendation": recommendation,
+        })
+
+    return {"anchors": anchors}
 
 
 @app.post("/videos/{video_id}/interpolate", response_model=InterpolationResponse)
@@ -672,9 +956,9 @@ async def interpolate_trajectories_endpoint(
             detail="No player positions found. Run map_players first."
         )
     
-    # Filter to only homography-sourced positions
+    # Filter to only direct-mapped positions (excludes previously interpolated)
     homography_positions = [
-        p for p in sparse_positions if p.source == "homography"
+        p for p in sparse_positions if p.source in ("homography", "homography_interp")
     ]
     
     if not homography_positions:
@@ -816,6 +1100,11 @@ async def process_video(
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid JSON in annotations: {e}")
 
+        # Determine frame range early (needed for propagation)
+        num_frames = metadata["num_frames"]
+        actual_start = max(0, start_frame)
+        actual_end = min(num_frames - 1, end_frame) if end_frame is not None else num_frames - 1
+
         # Check if annotations include line constraints (v2 format)
         has_lines = any('lines' in ann and ann['lines'] for ann in annotations_list)
 
@@ -856,24 +1145,35 @@ async def process_video(
 
         if not homographies:
             raise HTTPException(status_code=400, detail="No valid homographies computed. Need at least 4 points per frame.")
-        
-        store.homographies_cache[video_id] = homographies
-        save_homographies(video_id, homographies)
-        
+
+        # Store anchor homographies
+        store.anchor_homographies_cache[video_id] = homographies
+        save_anchor_homographies(video_id, homographies)
+
+        # Propagate to every frame using ORB forward composition
+        try:
+            per_frame_hs, _analysis = build_constrained_per_frame_H(
+                str(video_path), homographies, start_frame=actual_start, end_frame=actual_end
+            )
+        except Exception as e:
+            logger.warning(f"Per-frame H propagation failed for {video_id}: {e}; falling back to anchors")
+            per_frame_hs = homographies
+
+        store.homographies_cache[video_id] = per_frame_hs
+        save_homographies(video_id, per_frame_hs)
+
+        anchor_frame_indices = set(homographies.keys())
+
         # Step 4: Map players to pitch coordinates
-        positions = map_players_to_pitch(detections, homographies)
+        positions = map_players_to_pitch(
+            detections, per_frame_hs, anchor_frame_indices=anchor_frame_indices
+        )
         if not positions:
             raise HTTPException(status_code=500, detail="Failed to map players to pitch")
         
         store.player_positions_cache[video_id] = positions
         
         # Step 5: Interpolate trajectories
-        # Use provided frame range, or default to full video
-        num_frames = metadata["num_frames"]
-        actual_start = max(0, start_frame)
-        actual_end = min(num_frames - 1, end_frame) if end_frame is not None else num_frames - 1
-
-        # Filter positions to the requested frame range
         positions_in_range = [p for p in positions if actual_start <= p.frame_idx <= actual_end]
 
         interpolated = interpolate_trajectories(positions_in_range, actual_start, actual_end)

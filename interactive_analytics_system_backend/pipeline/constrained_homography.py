@@ -4,7 +4,7 @@ Fallback used when PTZ interpolation is not available.
 """
 import cv2
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple
 
 
 def _orb_inter_frame_H(f1, f2, n_features=2000, ransac_thresh=4.0):
