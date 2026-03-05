@@ -1,8 +1,10 @@
 """FastAPI application for video analysis pipeline."""
+import asyncio
 import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 import json
@@ -543,7 +545,9 @@ async def compute_homographies(
     
     # Compute homographies
     try:
-        homographies = compute_homographies_from_annotations(annotations_dict)
+        homographies = await asyncio.to_thread(
+            compute_homographies_from_annotations, annotations_dict
+        )
         store.homographies_cache[video_id] = homographies
         save_homographies(video_id, homographies)
     except Exception as e:
@@ -611,11 +615,14 @@ async def compute_homographies_with_line_constraints(
 
     # Compute anchor homographies with line constraints
     try:
-        anchor_homographies, computation_info = compute_homographies_with_lines(
-            annotations_dict,
-            num_samples_per_line=num_samples_per_line,
-            max_iterations=max_iterations,
-            keypoint_weight=keypoint_weight
+        anchor_homographies, computation_info = await asyncio.to_thread(
+            partial(
+                compute_homographies_with_lines,
+                annotations_dict,
+                num_samples_per_line=num_samples_per_line,
+                max_iterations=max_iterations,
+                keypoint_weight=keypoint_weight,
+            )
         )
     except Exception as e:
         logger.error(f"Line-constrained homography computation failed for video {video_id}: {e}")
@@ -639,8 +646,14 @@ async def compute_homographies_with_line_constraints(
     video_path = video_info["path"]
     num_frames = video_info["num_frames"]
     try:
-        per_frame_hs, _analysis = build_constrained_per_frame_H(
-            video_path, anchor_homographies, start_frame=0, end_frame=num_frames - 1
+        per_frame_hs, _analysis = await asyncio.to_thread(
+            partial(
+                build_constrained_per_frame_H,
+                video_path,
+                anchor_homographies,
+                start_frame=0,
+                end_frame=num_frames - 1,
+            )
         )
     except Exception as e:
         logger.error(f"Per-frame H propagation failed for video {video_id}: {e}")
