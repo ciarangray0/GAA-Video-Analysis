@@ -11,6 +11,7 @@ class VideoStore:
         self.videos: Dict[str, dict] = {}
         self.detections_cache: Dict[str, List[Detection]] = {}
         self.homographies_cache: Dict[str, Dict[int, Any]] = {}
+        self.anchor_homographies_cache: Dict[str, Dict[int, Any]] = {}
         self.player_positions_cache: Dict[str, List[PlayerPitchPosition]] = {}
 
 

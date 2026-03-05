@@ -6,7 +6,7 @@ interface DebugLogProps {
   onClear: () => void
   videoMetadata: VideoMetadata | null
   stepAResult: { frames_processed: number; tracks: number; num_detections: number } | null
-  stepBResult: { frames: number[]; info: Record<string, any> } | null
+  stepBResult: { frames: number[]; per_frame_count: number; info: Record<string, any> } | null
   stepCResult: { positions: PlayerPosition[]; total: number } | null
   stepDResult: { frames_generated: number; method: string } | null
 }

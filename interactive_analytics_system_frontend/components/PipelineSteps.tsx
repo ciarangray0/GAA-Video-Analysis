@@ -2,19 +2,25 @@ import { useCallback } from 'react'
 import type { VideoMetadata, AnchorFrame, PlayerPosition, AnchorFrameAnnotation } from '../types'
 import { API_URL, getDetections, mapPlayers, interpolateTrajectories, getPlayerPositions } from '../lib/api'
 
+interface StepBResult {
+  frames: number[]
+  per_frame_count: number
+  info: Record<string, any>
+}
+
 interface PipelineStepsProps {
   videoMetadata: VideoMetadata | null
   anchorFrames: AnchorFrame[]
   trimStartSeconds: number
   trimEndSeconds: number | null
   stepAResult: { frames_processed: number; tracks: number; num_detections: number } | null
-  stepBResult: { frames: number[]; info: Record<string, any> } | null
+  stepBResult: StepBResult | null
   stepCResult: { positions: PlayerPosition[]; total: number } | null
   stepDResult: { frames_generated: number; method: string } | null
   staleSteps: Set<string>
   runningStep: string | null
   onStepAComplete: (result: { frames_processed: number; tracks: number; num_detections: number }) => void
-  onStepBComplete: (result: { frames: number[]; info: Record<string, any> }, homographyFrames: number[]) => void
+  onStepBComplete: (result: StepBResult, homographyFrames: number[]) => void
   onStepCComplete: (result: { positions: PlayerPosition[]; total: number }) => void
   onStepDComplete: (result: { frames_generated: number; method: string }, allPositions: PlayerPosition[], startFrame: number, endFrame: number, fps: number) => void
   onStepsMarkedStale: (steps: string[]) => void
@@ -100,25 +106,24 @@ export default function PipelineSteps({
     onRunningStepChange('B')
     onError('')
     try {
-      const hasLines = validAnnotations.some(a => a.lines.length > 0)
-      const endpoint = hasLines
-        ? `${API_URL}/videos/${videoMetadata.video_id}/homographies/v2`
-        : `${API_URL}/videos/${videoMetadata.video_id}/homographies`
+      // Always use v2 — it works without lines and propagates per-frame Hs
+      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v2`
 
       const res = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(hasLines
-          ? validAnnotations
-          : validAnnotations.map(a => ({ frame_idx: a.frame_idx, points: a.points }))
-        ),
+        body: JSON.stringify(validAnnotations),
       })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Homography computation failed')
       }
       const data = await res.json()
-      const result = { frames: data.frames || [], info: data.info || {} }
+      const result: StepBResult = {
+        frames: data.frames || [],
+        per_frame_count: data.per_frame_count ?? (data.frames || []).length,
+        info: data.info || {},
+      }
       onStepBComplete(result, data.frames || [])
       onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['B'])
@@ -205,8 +210,9 @@ export default function PipelineSteps({
         </button>
         {stepBResult && (
           <div className="step-result">
-            <p>✅ Homographies computed for {stepBResult.frames.length} frames</p>
+            <p>✅ Homographies computed for {stepBResult.frames.length} anchor frames</p>
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
+            <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
             {Object.keys(stepBResult.info).length > 0 && (
               <details className="step-details">
                 <summary>Computation Info</summary>
@@ -274,7 +280,7 @@ export default function PipelineSteps({
               <summary>Sample positions (first 20)</summary>
               <table className="debug-table">
                 <thead>
-                  <tr><th>frame_idx</th><th>track_id</th><th>x_pitch</th><th>y_pitch</th></tr>
+                  <tr><th>frame_idx</th><th>track_id</th><th>x_pitch</th><th>y_pitch</th><th>source</th></tr>
                 </thead>
                 <tbody>
                   {stepCResult.positions.slice(0, 20).map((p, i) => (
@@ -283,6 +289,7 @@ export default function PipelineSteps({
                       <td>#{p.track_id}</td>
                       <td>{p.x_pitch.toFixed(1)}</td>
                       <td>{p.y_pitch.toFixed(1)}</td>
+                      <td>{p.source}</td>
                     </tr>
                   ))}
                 </tbody>

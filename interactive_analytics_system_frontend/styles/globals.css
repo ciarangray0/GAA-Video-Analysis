@@ -1323,3 +1323,42 @@ button.warning:hover {
   color: #555;
   font-style: italic;
 }
+
+.debug-panel {
+  margin: 16px 0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.debug-panel > summary {
+  padding: 10px 14px;
+  background: #f9f9f9;
+  cursor: pointer;
+  font-weight: 600;
+  user-select: none;
+  list-style: none;
+}
+
+.debug-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.debug-panel > summary::before {
+  content: '▶ ';
+  font-size: 0.7em;
+}
+
+details[open].debug-panel > summary::before {
+  content: '▼ ';
+}
+
+.debug-panel .debug-panel-body {
+  padding: 12px;
+}
+
+.debug-panel .debug-info {
+  margin-bottom: 8px;
+  font-size: 0.9em;
+  color: #555;
+}
