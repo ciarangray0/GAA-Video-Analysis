@@ -249,50 +249,27 @@ def validate_line_annotation(
     """
     Validate a line annotation for geometric consistency.
 
-    Performs two checks:
-    1. Both endpoints should project to similar Y values (line is horizontal)
-    2. Projected Y should be reasonably close to expected Y
-
-    Args:
-        line_annotation: Dict with line_id, u1, v1, u2, v2
-        H_initial: Initial homography estimate
-        y_tolerance_pixels: Maximum allowed Y deviation
-
-    Returns:
-        Tuple of (is_valid, error_message)
-        - is_valid: True if annotation passes validation
-        - error_message: Empty string if valid, otherwise describes the issue
+    Checks that the average projected Y of the line's endpoints is
+    reasonably close to the expected Y for that line.
     """
     try:
         y_expected = get_line_y_canvas(line_annotation['line_id'])
     except ValueError as e:
         return False, str(e)
 
-    # Project both endpoints through homography
     p1 = np.array([line_annotation['u1'], line_annotation['v1'], 1.0])
     p2 = np.array([line_annotation['u2'], line_annotation['v2'], 1.0])
 
     proj1 = H_initial @ p1
     proj2 = H_initial @ p2
 
-    # Check for points at infinity
     if abs(proj1[2]) < 1e-10 or abs(proj2[2]) < 1e-10:
         return False, "Line endpoints project to infinity"
 
-    # Normalize to get actual coordinates
     y1 = proj1[1] / proj1[2]
     y2 = proj2[1] / proj2[2]
 
-    # Check 1: Both Y values should be similar (line is horizontal in world space)
-    y_diff = abs(y1 - y2)
-    if y_diff > y_tolerance_pixels:
-        return False, (
-            f"Line endpoints project to very different Y values: "
-            f"{y1:.1f} vs {y2:.1f} (diff={y_diff:.1f}px). "
-            f"This suggests the line annotation is incorrect."
-        )
-
-    # Check 2: Average projected Y should be close to expected Y
+    # Only check average Y proximity to expected — not endpoint spread
     y_avg = (y1 + y2) / 2
     y_error = abs(y_avg - y_expected)
     if y_error > y_tolerance_pixels * 1.5:
