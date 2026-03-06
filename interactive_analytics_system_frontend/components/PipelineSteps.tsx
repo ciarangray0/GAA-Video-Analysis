@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { VideoMetadata, AnchorFrame, PlayerPosition, AnchorFrameAnnotation } from '../types'
 import { API_URL, getDetections, mapPlayers, interpolateTrajectories, getPlayerPositions } from '../lib/api'
 
@@ -6,6 +6,30 @@ interface StepBResult {
   frames: number[]
   per_frame_count: number
   info: Record<string, any>
+}
+
+interface PerFrameMappingFrame {
+  frame: number
+  y_pf: number
+  y_na: number
+  err_pf: number
+  err_na: number
+  improvement: number
+}
+
+interface PerFrameMappingSummary {
+  median_pf: number
+  mean_pf: number
+  max_pf: number
+  median_na: number
+  mean_na: number
+  max_na: number
+  pct_better: number
+}
+
+interface PerFrameMappingData {
+  frames: PerFrameMappingFrame[]
+  summary: PerFrameMappingSummary | null
 }
 
 interface PipelineStepsProps {
@@ -18,17 +42,31 @@ interface PipelineStepsProps {
   stepCResult: { positions: PlayerPosition[]; total: number } | null
   stepDResult: { frames_generated: number; method: string } | null
   staleSteps: Set<string>
-  runningStep: string | null
+  runningSteps: Set<string>
   onStepAComplete: (result: { frames_processed: number; tracks: number; num_detections: number }) => void
   onStepBComplete: (result: StepBResult, homographyFrames: number[]) => void
   onStepCComplete: (result: { positions: PlayerPosition[]; total: number }) => void
   onStepDComplete: (result: { frames_generated: number; method: string }, allPositions: PlayerPosition[], startFrame: number, endFrame: number, fps: number) => void
   onStepsMarkedStale: (steps: string[]) => void
   onStepsClearedStale: (steps: string[]) => void
-  onRunningStepChange: (step: string | null) => void
+  onRunningStepChange: (step: string, action: 'add' | 'remove') => void
   onError: (msg: string) => void
   onStatusChange: (msg: string) => void
   logApiCall: (entry: string) => void
+}
+
+function reprErrorLabel(val: number | undefined): string {
+  if (val === undefined) return '—'
+  if (val < 10) return `${val}px ✓`
+  if (val < 20) return `${val}px ⚠`
+  return `${val}px ✗`
+}
+
+function reprErrorColor(val: number | undefined): string {
+  if (val === undefined) return ''
+  if (val < 10) return '#2d7a2d'
+  if (val < 20) return '#b8860b'
+  return '#cc2222'
 }
 
 export default function PipelineSteps({
@@ -41,7 +79,7 @@ export default function PipelineSteps({
   stepCResult,
   stepDResult,
   staleSteps,
-  runningStep,
+  runningSteps,
   onStepAComplete,
   onStepBComplete,
   onStepCComplete,
@@ -53,6 +91,10 @@ export default function PipelineSteps({
   onStatusChange,
   logApiCall,
 }: PipelineStepsProps) {
+  const [perFrameData, setPerFrameData] = useState<PerFrameMappingData | null>(null)
+  const [loadingDiagnostic, setLoadingDiagnostic] = useState(false)
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
+
   // Internal fetch wrapper that logs API calls
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
     const method = options?.method || 'GET'
@@ -70,10 +112,13 @@ export default function PipelineSteps({
 
   const runStepA = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
-    onRunningStepChange('A')
+    onRunningStepChange('A', 'add')
     onError('')
     try {
-      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track`, { method: 'POST' })
+      const params = new URLSearchParams()
+      params.set('trim_start', String(trimStartSeconds))
+      if (trimEndSeconds !== null) params.set('trim_end', String(trimEndSeconds))
+      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track?${params}`, { method: 'POST' })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Tracking failed')
@@ -86,13 +131,12 @@ export default function PipelineSteps({
     } catch (err: any) {
       onError(err.message || 'Tracking failed')
     } finally {
-      onRunningStepChange(null)
+      onRunningStepChange('A', 'remove')
     }
-  }, [videoMetadata, apiFetch, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, trimStartSeconds, trimEndSeconds, apiFetch, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepB = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
-    if (!stepAResult) { onError('Please run tracking first (Step A)'); return }
 
     const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
       .filter(af => !af.isSkipped && af.points.length >= 4)
@@ -103,7 +147,7 @@ export default function PipelineSteps({
       return
     }
 
-    onRunningStepChange('B')
+    onRunningStepChange('B', 'add')
     onError('')
     try {
       // Always use v2 — it works without lines and propagates per-frame Hs
@@ -130,15 +174,15 @@ export default function PipelineSteps({
     } catch (err: any) {
       onError(err.message || 'Homography computation failed')
     } finally {
-      onRunningStepChange(null)
+      onRunningStepChange('B', 'remove')
     }
-  }, [videoMetadata, stepAResult, anchorFrames, apiFetch, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, anchorFrames, apiFetch, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepC = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
     if (!stepBResult) { onError('Please compute homographies first (Step B)'); return }
 
-    onRunningStepChange('C')
+    onRunningStepChange('C', 'add')
     onError('')
     try {
       const positions = await mapPlayers(videoMetadata.video_id)
@@ -148,7 +192,7 @@ export default function PipelineSteps({
     } catch (err: any) {
       onError(err.message || 'Player mapping failed')
     } finally {
-      onRunningStepChange(null)
+      onRunningStepChange('C', 'remove')
     }
   }, [videoMetadata, stepBResult, onStepCComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
@@ -161,7 +205,7 @@ export default function PipelineSteps({
       ? Math.floor(trimEndSeconds * videoMetadata.fps)
       : videoMetadata.num_frames - 1
 
-    onRunningStepChange('D')
+    onRunningStepChange('D', 'add')
     onError('')
     try {
       const data = await interpolateTrajectories(videoMetadata.video_id, startFrame, endFrame)
@@ -172,11 +216,36 @@ export default function PipelineSteps({
     } catch (err: any) {
       onError(err.message || 'Interpolation failed')
     } finally {
-      onRunningStepChange(null)
+      onRunningStepChange('D', 'remove')
     }
   }, [videoMetadata, stepCResult, trimStartSeconds, trimEndSeconds, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
 
+  const loadPerFrameDiagnostic = useCallback(async () => {
+    if (!videoMetadata) return
+    setLoadingDiagnostic(true)
+    setDiagnosticError(null)
+    try {
+      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/diagnostics/per-frame-mapping`)
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Diagnostic failed')
+      }
+      const data: PerFrameMappingData = await res.json()
+      setPerFrameData(data)
+    } catch (err: any) {
+      setDiagnosticError(err.message || 'Failed to load diagnostic')
+    } finally {
+      setLoadingDiagnostic(false)
+    }
+  }, [videoMetadata, apiFetch])
+
+  const validAnnotationCount = useMemo(
+    () => anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length,
+    [anchorFrames]
+  )
+
   if (!videoMetadata) return null
+
 
   return (
     <div className="process-section">
@@ -186,8 +255,8 @@ export default function PipelineSteps({
           <h4>Step A: Upload &amp; Run Tracking</h4>
           {staleSteps.has('A') && <span className="stale-badge">STALE</span>}
         </div>
-        <button onClick={runStepA} disabled={runningStep !== null} className="process-btn">
-          {runningStep === 'A' ? 'Running...' : 'Upload & Run Tracking'}
+        <button onClick={runStepA} disabled={runningSteps.has('A')} className="process-btn">
+          {runningSteps.has('A') ? 'Running...' : 'Upload & Run Tracking'}
         </button>
         {stepAResult && (
           <div className="step-result">
@@ -205,8 +274,8 @@ export default function PipelineSteps({
           <h4>Step B: Compute Homographies</h4>
           {staleSteps.has('B') && <span className="stale-badge">STALE</span>}
         </div>
-        <button onClick={runStepB} disabled={!stepAResult || runningStep !== null} className="process-btn">
-          {runningStep === 'B' ? 'Computing...' : 'Compute Homographies'}
+        <button onClick={runStepB} disabled={runningSteps.has('B') || validAnnotationCount === 0} className="process-btn">
+          {runningSteps.has('B') ? 'Computing...' : 'Compute Homographies'}
         </button>
         {stepBResult && (
           <div className="step-result">
@@ -214,28 +283,39 @@ export default function PipelineSteps({
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
             <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
             {Object.keys(stepBResult.info).length > 0 && (
-              <details className="step-details">
-                <summary>Computation Info</summary>
-                <table className="debug-table">
-                  <thead>
-                    <tr><th>Frame</th><th>Keypoints</th><th>Lines</th><th>Converged</th><th>Warnings</th></tr>
-                  </thead>
-                  <tbody>
-                    {stepBResult.frames.map(f => {
-                      const info = stepBResult.info[String(f)] || {}
-                      return (
-                        <tr key={f}>
-                          <td>{f}</td>
-                          <td>{info.num_keypoints ?? '—'}</td>
-                          <td>{info.valid_lines ?? 0}</td>
-                          <td>{info.converged !== undefined ? (info.converged ? '✅' : '❌') : '—'}</td>
-                          <td>{info.warnings ? info.warnings.join('; ') : '—'}</td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </details>
+              <table className="debug-table">
+                <thead>
+                  <tr>
+                    <th>Frame</th>
+                    <th>Keypoints</th>
+                    <th>Lines</th>
+                    <th>Converged</th>
+                    <th>Repr Error (mean)</th>
+                    <th>Repr Error (max)</th>
+                    <th>Warnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stepBResult.frames.map(f => {
+                    const info = stepBResult.info[String(f)] || {}
+                    return (
+                      <tr key={f}>
+                        <td>{f}</td>
+                        <td>{info.num_keypoints ?? '—'}</td>
+                        <td>{info.valid_lines ?? 0}</td>
+                        <td>{info.converged !== undefined ? (info.converged ? '✅' : '❌') : '—'}</td>
+                        <td style={{ color: reprErrorColor(info.repr_mean) }}>
+                          {reprErrorLabel(info.repr_mean)}
+                        </td>
+                        <td style={{ color: reprErrorColor(info.repr_max) }}>
+                          {reprErrorLabel(info.repr_max)}
+                        </td>
+                        <td>{info.line_warnings ? info.line_warnings.join('; ') : '—'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             )}
             <div className="warped-thumbs">
               {stepBResult.frames.map(f => (
@@ -270,8 +350,8 @@ export default function PipelineSteps({
           <h4>Step C: Map Players to Pitch</h4>
           {staleSteps.has('C') && <span className="stale-badge">STALE</span>}
         </div>
-        <button onClick={runStepC} disabled={!stepBResult || runningStep !== null} className="process-btn">
-          {runningStep === 'C' ? 'Mapping...' : 'Map Players'}
+        <button onClick={runStepC} disabled={runningSteps.has('C') || !stepBResult || !stepAResult} className="process-btn">
+          {runningSteps.has('C') ? 'Mapping...' : 'Map Players'}
         </button>
         {stepCResult && (
           <div className="step-result">
@@ -305,8 +385,8 @@ export default function PipelineSteps({
           <h4>Step D: Interpolate Trajectories</h4>
           {staleSteps.has('D') && <span className="stale-badge">STALE</span>}
         </div>
-        <button onClick={runStepD} disabled={!stepCResult || runningStep !== null} className="process-btn">
-          {runningStep === 'D' ? 'Interpolating...' : 'Interpolate'}
+        <button onClick={runStepD} disabled={runningSteps.has('D') || !stepCResult} className="process-btn">
+          {runningSteps.has('D') ? 'Interpolating...' : 'Interpolate'}
         </button>
         {stepDResult && (
           <div className="step-result">
@@ -315,6 +395,89 @@ export default function PipelineSteps({
           </div>
         )}
       </div>
+
+      {/* Per-frame mapping diagnostic (only shown after Step D) */}
+      {stepDResult && (
+        <div className="pipeline-step">
+          <details className="step-details">
+            <summary>Per-Frame Mapping Diagnostic</summary>
+            <div style={{ marginTop: '8px' }}>
+              <p style={{ fontSize: '0.85em', color: '#555' }}>
+                Measures per-frame H vs nearest-anchor H accuracy using annotated 20m_top line points as simulated players.
+                Requires at least one anchor frame annotated with a 20m_top line.
+              </p>
+              <button
+                onClick={loadPerFrameDiagnostic}
+                disabled={loadingDiagnostic}
+                className="process-btn"
+                style={{ marginBottom: '8px' }}
+              >
+                {loadingDiagnostic ? 'Loading…' : 'Load Diagnostic'}
+              </button>
+              {diagnosticError && <p style={{ color: 'red' }}>{diagnosticError}</p>}
+              {perFrameData && perFrameData.frames.length === 0 && (
+                <p>No frames available — ensure at least one anchor has a 20m_top line annotation.</p>
+              )}
+              {perFrameData && perFrameData.summary && (
+                <>
+                  <p><strong>Summary (20m_top line mapping error)</strong></p>
+                  <table className="debug-table">
+                    <thead>
+                      <tr><th></th><th>Median (px)</th><th>Mean (px)</th><th>Max (px)</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Per-frame H</td>
+                        <td>{perFrameData.summary.median_pf}</td>
+                        <td>{perFrameData.summary.mean_pf}</td>
+                        <td>{perFrameData.summary.max_pf}</td>
+                      </tr>
+                      <tr>
+                        <td>Nearest anchor H</td>
+                        <td>{perFrameData.summary.median_na}</td>
+                        <td>{perFrameData.summary.mean_na}</td>
+                        <td>{perFrameData.summary.max_na}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p>Per-frame H better on <strong>{perFrameData.summary.pct_better}%</strong> of frames (by &gt;2px)</p>
+                </>
+              )}
+              {perFrameData && perFrameData.frames.length > 0 && (
+                <details style={{ marginTop: '8px' }}>
+                  <summary>Frame-by-frame data ({perFrameData.frames.length} frames)</summary>
+                  <table className="debug-table">
+                    <thead>
+                      <tr>
+                        <th>Frame</th>
+                        <th>PF y (px)</th>
+                        <th>NA y (px)</th>
+                        <th>PF err (px)</th>
+                        <th>NA err (px)</th>
+                        <th>Improvement (px)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {perFrameData.frames.map(r => (
+                        <tr key={r.frame}>
+                          <td>{r.frame}</td>
+                          <td>{r.y_pf}</td>
+                          <td>{r.y_na}</td>
+                          <td>{r.err_pf}</td>
+                          <td>{r.err_na}</td>
+                          <td style={{ color: r.improvement > 0 ? '#2d7a2d' : r.improvement < 0 ? '#cc2222' : undefined }}>
+                            {r.improvement > 0 ? '+' : ''}{r.improvement}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
+              )}
+            </div>
+          </details>
+        </div>
+      )}
     </div>
   )
 }

@@ -22,7 +22,7 @@ export default function Home() {
   const [stepCResult, setStepCResult] = useState<{ positions: PlayerPosition[]; total: number } | null>(null)
   const [stepDResult, setStepDResult] = useState<{ frames_generated: number; method: string } | null>(null)
   const [staleSteps, setStaleSteps] = useState<Set<string>>(new Set())
-  const [runningStep, setRunningStep] = useState<string | null>(null)
+  const [runningSteps, setRunningSteps] = useState<Set<string>>(new Set())
   const stepDoneRef = useRef({ B: false, C: false, D: false })
 
   const [playerPositions, setPlayerPositions] = useState<PlayerPosition[]>([])
@@ -192,7 +192,7 @@ export default function Home() {
               stepCResult={stepCResult}
               stepDResult={stepDResult}
               staleSteps={staleSteps}
-              runningStep={runningStep}
+              runningSteps={runningSteps}
               onStepAComplete={(result) => setStepAResult(result)}
               onStepBComplete={(result, frames) => { setStepBResult(result); setHomographyFrameIndices(frames) }}
               onStepCComplete={(result) => setStepCResult(result)}
@@ -207,7 +207,14 @@ export default function Home() {
               }}
               onStepsMarkedStale={markStale}
               onStepsClearedStale={clearStale}
-              onRunningStepChange={setRunningStep}
+              onRunningStepChange={(step, action) => {
+                setRunningSteps(prev => {
+                  const next = new Set(prev)
+                  if (action === 'add') next.add(step)
+                  else next.delete(step)
+                  return next
+                })
+              }}
               onError={setError}
               onStatusChange={setStatus}
               logApiCall={logApiCall}

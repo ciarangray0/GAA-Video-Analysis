@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from functools import partial
@@ -235,6 +236,18 @@ def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Resp
         media_type="image/jpeg",
         headers={"Cache-Control": "max-age=3600"}
     )
+
+
+def _trim_video(input_path: str, trim_start: float, trim_end: Optional[float], output_path: str) -> None:
+    """Trim a video using ffmpeg, writing result to output_path."""
+    cmd = ["ffmpeg", "-y", "-ss", str(trim_start), "-i", input_path]
+    if trim_end is not None:
+        cmd += ["-t", str(trim_end - trim_start)]
+    cmd += ["-c", "copy", output_path]
+    # 5-minute timeout to prevent indefinite blocking on malformed inputs
+    result = subprocess.run(cmd, capture_output=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg trimming failed: {result.stderr.decode()}")
 
 
 # --- Endpoints ---
@@ -482,19 +495,58 @@ async def get_video_detections(video_id: str):
 
 
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
-async def track_video(video_id: str):
+async def track_video(
+    video_id: str,
+    trim_start: float = Query(0.0, ge=0.0, description="Trim start in seconds"),
+    trim_end: Optional[float] = Query(None, ge=0.0, description="Trim end in seconds"),
+):
     """
     Run YOLO + ByteTrack tracking on the video.
-    
+
+    If trim_start or trim_end are provided, the video is trimmed with ffmpeg
+    before tracking. The trimmed video replaces the stored video path so all
+    downstream frame-extraction endpoints serve frames from the trimmed clip.
+
     Returns number of frames processed and unique tracks detected.
     """
     if video_id not in store.videos:
         raise HTTPException(status_code=404, detail="Video not found")
-    
-    video_path = store.videos[video_id]["path"]
-    
-    # Check cache first
-    detections = load_detections(video_id)
+
+    video_info = store.videos[video_id]
+    video_path = video_info["path"]
+
+    # Determine if a trim is requested
+    duration = video_info.get("duration_seconds", float("inf"))
+    needs_trim = trim_start > 0 or (trim_end is not None and trim_end < duration)
+
+    if needs_trim:
+        trimmed_path = str(VIDEOS_DIR / f"{video_id}_trimmed.mp4")
+        try:
+            _trim_video(video_path, trim_start, trim_end, trimmed_path)
+            trimmed_meta = get_video_metadata(trimmed_path)
+            # Replace stored video with trimmed version
+            store.videos[video_id].update({
+                "path": trimmed_path,
+                "num_frames": trimmed_meta["num_frames"],
+                "fps": trimmed_meta["fps"],
+                "duration_seconds": trimmed_meta["duration_seconds"],
+            })
+            video_path = trimmed_path
+        except Exception as e:
+            logger.error(f"Trimming failed for {video_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Video trimming failed: {str(e)}")
+        # Invalidate any previously cached detections for the old video
+        store.detections_cache.pop(video_id, None)
+        det_file = TRACKS_DIR / f"{video_id}.json"
+        if det_file.exists():
+            det_file.unlink()
+
+    # When a new trim was just applied the old detections (on the full video) are
+    # stale, so always re-run tracking.  Without a trim, re-use cached results.
+    if needs_trim:
+        detections = None
+    else:
+        detections = load_detections(video_id)
     if detections is None:
         # Run tracking (uses GPU or local based on GPU_PROVIDER env var)
         try:
@@ -508,16 +560,16 @@ async def track_video(video_id: str):
             raise HTTPException(status_code=500, detail=f"Tracking failed: {str(e)}")
     else:
         store.detections_cache[video_id] = detections
-    
+
     if not detections:
         raise HTTPException(status_code=500, detail="No detections found in video")
 
     # Count unique tracks
     unique_tracks = len(set(d.track_id for d in detections))
-    
+
     # Count frames processed
     frames_processed = max(d.frame_idx for d in detections) + 1
-    
+
     logger.info(f"Tracking complete for {video_id}: {frames_processed} frames, {unique_tracks} tracks")
 
     return TrackResponse(
@@ -1037,6 +1089,118 @@ async def get_player_positions(video_id: str):
     positions_sorted = sorted(positions, key=lambda p: (p.frame_idx, p.track_id))
     
     return positions_sorted
+
+
+@app.get("/videos/{video_id}/diagnostics/per-frame-mapping")
+async def diagnostics_per_frame_mapping(video_id: str):
+    """
+    Compute per-frame mapping accuracy by using annotated 20m_top line points
+    as simulated players with a known expected canvas Y position.
+
+    For each anchor frame that has a 20m_top line annotation, the midpoint of
+    that line is projected through:
+      (a) the per-frame propagated H, and
+      (b) the nearest anchor H,
+    and the error against the expected canvas Y is reported.
+
+    Returns frame-by-frame accuracy data and summary statistics.
+    Requires that homographies/v2 has been run first (annotations + Hs saved).
+    """
+    if video_id not in store.videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    annotations = load_annotations(video_id)
+    if annotations is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No annotations found. Compute homographies (v2) first."
+        )
+
+    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    if not anchor_hs:
+        raise HTTPException(
+            status_code=400,
+            detail="No anchor homographies found. Compute homographies (v2) first."
+        )
+
+    per_frame_hs = store.homographies_cache.get(video_id) or load_homographies(video_id)
+    if not per_frame_hs:
+        raise HTTPException(
+            status_code=400,
+            detail="No per-frame homographies found. Compute homographies (v2) first."
+        )
+
+    from pipeline.homography import map_pixel_to_pitch
+
+    PITCH_METERS_H = 140.0
+    # The 20m line is used as the test reference because it appears in most
+    # wide-angle shots and its canvas Y position is precisely known.
+    expected_y_20m = 20.0 / PITCH_METERS_H * OUT_H
+
+    anchor_list = sorted(anchor_hs.keys())
+    results = []
+
+    for idx_in_list, anchor_frame_idx in enumerate(anchor_list):
+        ann = annotations.get(anchor_frame_idx, {})
+        lines = ann.get("lines", [])
+        line_20m = next((l for l in lines if l.get("line_id") == "20m_top"), None)
+        if line_20m is None:
+            continue
+
+        mid_img_x = (line_20m["u1"] + line_20m["u2"]) / 2.0
+        mid_img_y = (line_20m["v1"] + line_20m["v2"]) / 2.0
+
+        next_anchor = (
+            anchor_list[idx_in_list + 1]
+            if idx_in_list + 1 < len(anchor_list)
+            else anchor_frame_idx + 1
+        )
+
+        for f in range(anchor_frame_idx, next_anchor):
+            H_pf = per_frame_hs.get(f)
+            if H_pf is None:
+                continue
+
+            nearest = min(anchor_list, key=lambda a: abs(a - f))
+            H_na = anchor_hs[nearest]
+
+            _, y_pf = map_pixel_to_pitch(mid_img_x, mid_img_y, H_pf)
+            _, y_na = map_pixel_to_pitch(mid_img_x, mid_img_y, H_na)
+
+            err_pf = abs(y_pf - expected_y_20m)
+            err_na = abs(y_na - expected_y_20m)
+            improvement = err_na - err_pf
+
+            results.append({
+                "frame": f,
+                "y_pf": round(float(y_pf), 2),
+                "y_na": round(float(y_na), 2),
+                "err_pf": round(float(err_pf), 2),
+                "err_na": round(float(err_na), 2),
+                "improvement": round(float(improvement), 2),
+            })
+
+    if not results:
+        return {"frames": [], "summary": None}
+
+    errs_pf = [r["err_pf"] for r in results]
+    errs_na = [r["err_na"] for r in results]
+    # A 2px threshold filters out trivial noise so only meaningful improvements
+    # are counted towards the "pct_better" statistic.
+    pct_better = 100.0 * sum(1 for r in results if r["improvement"] > 2) / len(results)
+
+    return {
+        "frames": results,
+        "summary": {
+            "median_pf": round(float(np.median(errs_pf)), 2),
+            "mean_pf": round(float(np.mean(errs_pf)), 2),
+            "max_pf": round(float(np.max(errs_pf)), 2),
+            "median_na": round(float(np.median(errs_na)), 2),
+            "mean_na": round(float(np.mean(errs_na)), 2),
+            "max_na": round(float(np.max(errs_na)), 2),
+            "pct_better": round(pct_better, 1),
+        },
+    }
 
 
 @app.post("/process-video", response_model=ProcessVideoResponse)
