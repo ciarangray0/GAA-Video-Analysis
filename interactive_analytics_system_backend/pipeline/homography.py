@@ -305,6 +305,17 @@ def compute_homographies_with_lines(
                 min_line_pts_for_init=4,
             )
             homographies[frame_idx] = H
+            # Augment info with keypoint count and reprojection error
+            info['num_keypoints'] = len(keypoints)
+            try:
+                pts_h = np.column_stack([pts_image, np.ones(len(pts_image))])
+                projected = (H @ pts_h.T).T
+                projected = projected[:, :2] / projected[:, 2:3]
+                errors = np.sqrt(((projected - pts_canvas) ** 2).sum(axis=1))
+                info['repr_mean'] = round(float(np.mean(errors)), 2)
+                info['repr_max'] = round(float(np.max(errors)), 2)
+            except Exception:
+                pass
             computation_info[frame_idx] = info
         except ValueError as e:
             computation_info[frame_idx] = {
