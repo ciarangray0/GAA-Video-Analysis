@@ -1,6 +1,6 @@
 import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, PitchAnnotation } from '../types'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export async function uploadVideo(file: File): Promise<VideoMetadata> {
   const formData = new FormData()
@@ -95,5 +95,3 @@ export async function getPlayerPositions(videoId: string): Promise<PlayerPositio
   }
   return res.json()
 }
-
-export { API_URL }

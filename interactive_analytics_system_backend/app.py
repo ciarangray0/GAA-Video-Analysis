@@ -549,7 +549,9 @@ async def compute_homographies(
             compute_homographies_from_annotations, annotations_dict
         )
         store.homographies_cache[video_id] = homographies
+        store.anchor_homographies_cache[video_id] = homographies
         save_homographies(video_id, homographies)
+        save_anchor_homographies(video_id, homographies)
     except Exception as e:
         logger.error(f"Homography computation failed for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail="Homography computation failed")

@@ -40,11 +40,6 @@ def build_constrained_per_frame_H(
 
     cap = cv2.VideoCapture(video_path)
 
-    def read_frame(idx: int):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, f = cap.read()
-        return f if ret else None
-
     for seg_i, anchor_start in enumerate(anchor_list):
         if anchor_start > end_frame:
             break
@@ -60,13 +55,17 @@ def build_constrained_per_frame_H(
         if n_seg == 0:
             continue
 
-        f_prev   = read_frame(anchor_start)
+        # Seek once to the anchor frame, then read sequentially through the segment
+        cap.set(cv2.CAP_PROP_POS_FRAMES, anchor_start)
+        ret, f_prev_raw = cap.read()
+        f_prev   = f_prev_raw if ret else None
         H_accum  = np.eye(3, dtype=np.float64)
         fwd_ok   = 0
         fallback = 0
 
         for f in range(anchor_start + 1, min(anchor_end + 1, end_frame + 1)):
-            f_curr = read_frame(f)
+            ret, f_curr_raw = cap.read()
+            f_curr = f_curr_raw if ret else None
             if f_curr is None:
                 per_frame_H[f] = H_start
                 fallback += 1
