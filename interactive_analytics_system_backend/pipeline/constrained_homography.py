@@ -4,6 +4,7 @@ Fallback used when PTZ interpolation is not available.
 """
 import cv2
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 from typing import Dict, Tuple
 
 
@@ -32,6 +33,7 @@ def build_constrained_per_frame_H(
     end_frame: int,
     anchor_annotations: Dict[int, dict] = None,
     verbose: bool = False,
+    smooth_sigma: float = 2.0,
     **kwargs,
 ) -> Tuple[Dict[int, np.ndarray], dict]:
     anchor_list = sorted(anchor_H.keys())
@@ -99,4 +101,20 @@ def build_constrained_per_frame_H(
                   f"ORB ok={fwd_ok}/{n_seg} fallback={fallback}")
 
     cap.release()
+
+    # Smooth ORB-propagated H matrices to reduce frame-to-frame jitter.
+    # Anchor frames are restored after smoothing so their known-good values
+    # are never altered.
+    if smooth_sigma > 0 and len(per_frame_H) > 1:
+        anchor_frames = set(anchor_H.keys())
+        frame_indices = sorted(per_frame_H.keys())
+        H_stack = np.array([per_frame_H[f] for f in frame_indices])  # (N, 3, 3)
+        H_smooth = gaussian_filter1d(H_stack, sigma=smooth_sigma, axis=0)
+        for i, f in enumerate(frame_indices):
+            if f not in anchor_frames:
+                H_f = H_smooth[i]
+                if abs(H_f[2, 2]) > 1e-10:
+                    H_f = H_f / H_f[2, 2]
+                per_frame_H[f] = H_f
+
     return per_frame_H, analysis
