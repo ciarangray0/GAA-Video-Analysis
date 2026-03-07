@@ -5,13 +5,12 @@ All interpolation happens in PITCH CANVAS PIXEL coordinates (e.g., 850 × 1400).
 
 Coordinate System:
 ==================
-- Input: Sparse positions at anchor frames (pitch canvas pixels)
-- Output: Dense positions for all frames (pitch canvas pixels)
+- Input: Dense positions from per-frame ORB-propagated homographies (pitch canvas pixels)
+- Output: Smoothed dense positions for all frames (pitch canvas pixels)
 
-For tracks with 3+ anchor points, cubic spline interpolation is used for
-smoother trajectories. Tracks with only 2 points fall back to linear
-interpolation. Optionally, a Savitzky-Golay filter is applied to tracks
-with >15 interpolated data points to reduce remaining jitter.
+A Savitzky-Golay filter is applied per-track over each track's own frame span
+to remove high-frequency jitter introduced by ORB homography propagation.
+Positions are clamped to the valid pitch canvas range [0, OUT_W] × [0, OUT_H].
 
 Meters are NOT used - all coordinates are pitch canvas pixels.
 """
@@ -22,35 +21,43 @@ from scipy.signal import savgol_filter
 from pipeline.config import OUT_W, OUT_H
 from pipeline.schemas import PlayerPitchPosition
 
+# Minimum window for SavGol (must be odd and > polyorder).
+# At 25 fps, 11 frames ≈ 0.44 s — wide enough to smooth ORB drift while
+# keeping genuine rapid direction changes visible.
+_SAVGOL_WINDOW = 11
+_SAVGOL_POLYORDER = 2
 
 def interpolate_trajectories(
     sparse_positions: List[PlayerPitchPosition],
     start_frame: int,
     end_frame: int
 ) -> List[PlayerPitchPosition]:
-    """
-    Interpolate player trajectories between anchor frames.
+    """Smooth and interpolate player trajectories across all frames.
 
-    Uses cubic spline interpolation for tracks with 3+ anchor points and
-    linear interpolation for tracks with only 2 anchor points. Positions
-    are clamped to the valid pitch canvas range [0, OUT_W] × [0, OUT_H].
-    A Savitzky-Golay filter is applied to smooth tracks that have more
-    than 15 interpolated data points.
+    When called with dense ORB-mapped positions (one per frame), this function
+    acts primarily as a per-track smoother: it applies a Savitzky-Golay filter
+    over each track's own frame span to remove jitter introduced by ORB
+    homography propagation, then fills any remaining gaps with linear
+    interpolation.
+
+    When called with sparse anchor-only positions it fills gaps linearly before
+    smoothing, as before.
 
     All coordinates are in PITCH CANVAS PIXELS (not meters).
 
     Args:
-        sparse_positions: List of PlayerPitchPosition with source="homography"
-                         Coordinates are in pitch canvas pixels
-        start_frame: First frame to interpolate
-        end_frame: Last frame to interpolate (inclusive)
+        sparse_positions: List of PlayerPitchPosition (source="homography" or
+                         "homography_interp").  Coordinates in pitch canvas pixels.
+        start_frame: First frame of the output range.
+        end_frame:   Last frame of the output range (inclusive).
 
     Returns:
-        List of PlayerPitchPosition including both original anchor frames
-        (source="homography") and interpolated frames (source="interpolated")
-        All coordinates are in pitch canvas pixels
+        List of PlayerPitchPosition covering [start_frame, end_frame] for every
+        track present in the input.  source is preserved from the input for
+        frames that had a measured position; frames that were gap-filled by
+        linear interpolation use source="interpolated".
+        All coordinates are in pitch canvas pixels.
     """
-    # Filter positions in range
     filtered = [
         p for p in sparse_positions
         if start_frame <= p.frame_idx <= end_frame
@@ -60,68 +67,71 @@ def interpolate_trajectories(
         return []
 
     # Group by track_id
-    by_track = {}
+    by_track: dict = {}
     for pos in filtered:
-        if pos.track_id not in by_track:
-            by_track[pos.track_id] = []
-        by_track[pos.track_id].append(pos)
+        by_track.setdefault(pos.track_id, []).append(pos)
 
-    # Generate interpolated trajectories
-    all_positions = []
-    frames_interp = np.arange(start_frame, end_frame + 1)
+    all_positions: List[PlayerPitchPosition] = []
+    frames_range = np.arange(start_frame, end_frame + 1)
 
     for track_id, positions in by_track.items():
-        # Sort by frame
         positions_sorted = sorted(positions, key=lambda p: p.frame_idx)
 
         if len(positions_sorted) < 2:
-            # Not enough points to interpolate, keep original
             all_positions.extend(positions_sorted)
             continue
 
-        # Extract known frames and coordinates
         known_frames = np.array([p.frame_idx for p in positions_sorted])
         known_xs = np.array([p.x_pitch for p in positions_sorted])
         known_ys = np.array([p.y_pitch for p in positions_sorted])
 
-        # Use simple linear interpolation for all tracks with >=2 anchors.
-        # This avoids cubic-spline overshoot and keeps trajectories stable.
-        xs_interp = np.interp(frames_interp, known_frames, known_xs)
-        ys_interp = np.interp(frames_interp, known_frames, known_ys)
+        # Determine the contiguous frame range for this track
+        track_start = int(known_frames[0])
+        track_end = int(known_frames[-1])
+        track_frames = np.arange(track_start, track_end + 1)
 
-        # Clamp to valid pitch canvas bounds
-        xs_interp = np.clip(xs_interp, 0, OUT_W)
-        ys_interp = np.clip(ys_interp, 0, OUT_H)
+        # Build a source-label array parallel to track_frames so we can
+        # preserve the original source tags after smoothing.
+        frame_to_source = {p.frame_idx: p.source for p in positions_sorted}
 
-        # Optional Savitzky-Golay smoothing for long tracks
-        total_frames = len(frames_interp)
-        if total_frames > 15:
-            window_length = 7
-            xs_interp = savgol_filter(xs_interp, window_length=window_length, polyorder=2)
-            ys_interp = savgol_filter(ys_interp, window_length=window_length, polyorder=2)
-            # Re-clamp after smoothing (filter can nudge values slightly outside bounds)
-            xs_interp = np.clip(xs_interp, 0, OUT_W)
-            ys_interp = np.clip(ys_interp, 0, OUT_H)
+        # Linear interpolation over the track's own span to fill any gaps
+        xs_track = np.interp(track_frames, known_frames, known_xs)
+        ys_track = np.interp(track_frames, known_frames, known_ys)
 
-        # Create positions for all frames
-        known_frame_set = set(known_frames)
+        # Clamp before smoothing
+        xs_track = np.clip(xs_track, 0, OUT_W)
+        ys_track = np.clip(ys_track, 0, OUT_H)
 
-        for i, frame_idx in enumerate(frames_interp):
-            if frame_idx in known_frame_set:
-                # Keep original anchor frame position
-                original = next(p for p in positions_sorted if p.frame_idx == frame_idx)
-                all_positions.append(original)
-            else:
-                # Interpolated position
-                all_positions.append(PlayerPitchPosition(
-                    frame_idx=int(frame_idx),
-                    track_id=track_id,
-                    x_pitch=float(xs_interp[i]),
-                    y_pitch=float(ys_interp[i]),
-                    source="interpolated"
-                ))
+        # Apply SavGol over the track's own span.
+        # Require at least window+1 points so the filter is meaningful; fall
+        # back to no smoothing for very short tracks.
+        n_track = len(track_frames)
+        if n_track > _SAVGOL_WINDOW:
+            xs_track = savgol_filter(xs_track, window_length=_SAVGOL_WINDOW, polyorder=_SAVGOL_POLYORDER)
+            ys_track = savgol_filter(ys_track, window_length=_SAVGOL_WINDOW, polyorder=_SAVGOL_POLYORDER)
+            # Re-clamp: filter can nudge values fractionally outside bounds
+            xs_track = np.clip(xs_track, 0, OUT_W)
+            ys_track = np.clip(ys_track, 0, OUT_H)
 
-    # Sort by frame_idx, then track_id
+        # Build output only for frames within the requested range
+        track_frame_to_xy = {
+            int(f): (float(xs_track[i]), float(ys_track[i]))
+            for i, f in enumerate(track_frames)
+        }
+
+        for f in frames_range:
+            fi = int(f)
+            if fi < track_start or fi > track_end:
+                continue
+            x, y = track_frame_to_xy[fi]
+            source = frame_to_source.get(fi, "interpolated")
+            all_positions.append(PlayerPitchPosition(
+                frame_idx=fi,
+                track_id=track_id,
+                x_pitch=x,
+                y_pitch=y,
+                source=source,
+            ))
+
     all_positions.sort(key=lambda p: (p.frame_idx, p.track_id))
-
     return all_positions
