@@ -11,8 +11,6 @@ export default function Home() {
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadata | null>(null)
 
-  const [trimStartSeconds, setTrimStartSeconds] = useState(0)
-  const [trimEndSeconds, setTrimEndSeconds] = useState<number | null>(null)
   const [anchorInterval, setAnchorInterval] = useState(1)
   const [anchorFrames, setAnchorFrames] = useState<AnchorFrame[]>([])
   const [currentAnchorIdx, setCurrentAnchorIdx] = useState(0)
@@ -74,12 +72,9 @@ export default function Home() {
   const generateAnchorFrames = () => {
     if (!videoMetadata) return
     const fps = videoMetadata.fps
-    const startFrame = Math.floor(trimStartSeconds * fps)
-    const endFrame = trimEndSeconds !== null
-      ? Math.floor(trimEndSeconds * fps)
-      : videoMetadata.num_frames - 1
+    const endFrame = videoMetadata.num_frames - 1
     const frames: AnchorFrame[] = []
-    for (let seconds = trimStartSeconds; seconds <= (trimEndSeconds || videoMetadata.duration_seconds); seconds += anchorInterval) {
+    for (let seconds = 0; seconds <= videoMetadata.duration_seconds; seconds += anchorInterval) {
       const frameIdx = Math.floor(seconds * fps)
       if (frameIdx <= endFrame) frames.push({ frame_idx: frameIdx, isSkipped: false, points: [], lines: [] })
     }
@@ -121,7 +116,6 @@ export default function Home() {
           onUploadSuccess={(metadata, file) => {
             setVideoMetadata(metadata)
             setVideoFile(file)
-            setTrimEndSeconds(metadata.duration_seconds)
             setAnchorFrames([])
             setError('')
             setStatus('Video uploaded successfully!')
@@ -134,19 +128,6 @@ export default function Home() {
             <h2>2. Configure Anchor Frames</h2>
             <p>Set up which frames to use for pitch annotations.</p>
             <div className="config-form">
-              <div className="config-row">
-                <label>
-                  Trim Start (seconds):
-                  <input type="number" min={0} max={videoMetadata.duration_seconds} step={0.1} value={trimStartSeconds}
-                    onChange={(e) => setTrimStartSeconds(parseFloat(e.target.value) || 0)} />
-                </label>
-                <label>
-                  Trim End (seconds):
-                  <input type="number" min={trimStartSeconds} max={videoMetadata.duration_seconds} step={0.1}
-                    value={trimEndSeconds ?? videoMetadata.duration_seconds}
-                    onChange={(e) => setTrimEndSeconds(parseFloat(e.target.value) || null)} />
-                </label>
-              </div>
               <div className="config-row">
                 <label>
                   Anchor Frame Interval (seconds):
@@ -162,7 +143,7 @@ export default function Home() {
               <div className="config-preview">
                 <p>
                   This will generate approximately{' '}
-                  <strong>{Math.ceil(((trimEndSeconds ?? videoMetadata.duration_seconds) - trimStartSeconds) / anchorInterval)}</strong>{' '}
+                  <strong>{Math.ceil(videoMetadata.duration_seconds / anchorInterval)}</strong>{' '}
                   anchor frames to annotate.
                 </p>
               </div>
@@ -185,8 +166,6 @@ export default function Home() {
             <PipelineSteps
               videoMetadata={videoMetadata}
               anchorFrames={anchorFrames}
-              trimStartSeconds={trimStartSeconds}
-              trimEndSeconds={trimEndSeconds}
               stepAResult={stepAResult}
               stepBResult={stepBResult}
               stepCResult={stepCResult}
