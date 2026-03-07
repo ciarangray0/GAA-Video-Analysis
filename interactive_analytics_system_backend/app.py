@@ -1,8 +1,6 @@
 """FastAPI application for video analysis pipeline."""
 import asyncio
 import os
-import re
-import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from functools import partial
@@ -236,18 +234,6 @@ def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Resp
         media_type="image/jpeg",
         headers={"Cache-Control": "max-age=3600"}
     )
-
-
-def _trim_video(input_path: str, trim_start: float, trim_end: Optional[float], output_path: str) -> None:
-    """Trim a video using ffmpeg, writing result to output_path."""
-    cmd = ["ffmpeg", "-y", "-ss", str(trim_start), "-i", input_path]
-    if trim_end is not None:
-        cmd += ["-t", str(trim_end - trim_start)]
-    cmd += ["-c", "copy", output_path]
-    # 5-minute timeout to prevent indefinite blocking on malformed inputs
-    result = subprocess.run(cmd, capture_output=True, timeout=300)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg trimming failed: {result.stderr.decode()}")
 
 
 # --- Endpoints ---
@@ -495,60 +481,19 @@ async def get_video_detections(video_id: str):
 
 
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
-async def track_video(
-    video_id: str,
-    trim_start: float = Query(0.0, ge=0.0, description="Trim start in seconds"),
-    trim_end: Optional[float] = Query(None, ge=0.0, description="Trim end in seconds"),
-):
+async def track_video(video_id: str):
     """
     Run YOLO + ByteTrack tracking on the video.
-
-    If trim_start or trim_end are provided, the video is trimmed with ffmpeg
-    before tracking. The trimmed video replaces the stored video path so all
-    downstream frame-extraction endpoints serve frames from the trimmed clip.
 
     Returns number of frames processed and unique tracks detected.
     """
     if video_id not in store.videos:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    video_info = store.videos[video_id]
-    video_path = video_info["path"]
+    video_path = store.videos[video_id]["path"]
 
-    # Determine if a trim is requested
-    duration = video_info.get("duration_seconds", float("inf"))
-    needs_trim = trim_start > 0 or (trim_end is not None and trim_end < duration)
-
-    if needs_trim:
-        trimmed_path = str(VIDEOS_DIR / f"{video_id}_trimmed.mp4")
-        try:
-            _trim_video(video_path, trim_start, trim_end, trimmed_path)
-            trimmed_meta = get_video_metadata(trimmed_path)
-            # Replace stored video with trimmed version
-            store.videos[video_id].update({
-                "path": trimmed_path,
-                "num_frames": trimmed_meta["num_frames"],
-                "fps": trimmed_meta["fps"],
-                "duration_seconds": trimmed_meta["duration_seconds"],
-            })
-            video_path = trimmed_path
-        except Exception as e:
-            logger.error(f"Trimming failed for {video_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Video trimming failed: {str(e)}")
-        # Invalidate any previously cached detections for the old video
-        store.detections_cache.pop(video_id, None)
-        det_file = TRACKS_DIR / f"{video_id}.json"
-        if det_file.exists():
-            det_file.unlink()
-
-    # When a new trim was just applied the old detections (on the full video) are
-    # stale, so always re-run tracking.  Without a trim, re-use cached results.
-    if needs_trim:
-        detections = None
-    else:
-        detections = load_detections(video_id)
+    detections = load_detections(video_id)
     if detections is None:
-        # Run tracking (uses GPU or local based on GPU_PROVIDER env var)
         try:
             from pipeline.detect import run_tracking
             logger.info(f"Running tracking on video {video_id}")
@@ -564,10 +509,7 @@ async def track_video(
     if not detections:
         raise HTTPException(status_code=500, detail="No detections found in video")
 
-    # Count unique tracks
     unique_tracks = len(set(d.track_id for d in detections))
-
-    # Count frames processed
     frames_processed = max(d.frame_idx for d in detections) + 1
 
     logger.info(f"Tracking complete for {video_id}: {frames_processed} frames, {unique_tracks} tracks")
