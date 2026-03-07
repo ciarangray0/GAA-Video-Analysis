@@ -35,8 +35,6 @@ interface PerFrameMappingData {
 interface PipelineStepsProps {
   videoMetadata: VideoMetadata | null
   anchorFrames: AnchorFrame[]
-  trimStartSeconds: number
-  trimEndSeconds: number | null
   stepAResult: { frames_processed: number; tracks: number; num_detections: number } | null
   stepBResult: StepBResult | null
   stepCResult: { positions: PlayerPosition[]; total: number } | null
@@ -72,8 +70,6 @@ function reprErrorColor(val: number | undefined): string {
 export default function PipelineSteps({
   videoMetadata,
   anchorFrames,
-  trimStartSeconds,
-  trimEndSeconds,
   stepAResult,
   stepBResult,
   stepCResult,
@@ -115,10 +111,7 @@ export default function PipelineSteps({
     onRunningStepChange('A', 'add')
     onError('')
     try {
-      const params = new URLSearchParams()
-      params.set('trim_start', String(trimStartSeconds))
-      if (trimEndSeconds !== null) params.set('trim_end', String(trimEndSeconds))
-      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track?${params}`, { method: 'POST' })
+      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track`, { method: 'POST' })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Tracking failed')
@@ -133,7 +126,7 @@ export default function PipelineSteps({
     } finally {
       onRunningStepChange('A', 'remove')
     }
-  }, [videoMetadata, trimStartSeconds, trimEndSeconds, apiFetch, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, apiFetch, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepB = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
@@ -200,10 +193,8 @@ export default function PipelineSteps({
     if (!videoMetadata) { onError('Please upload a video first'); return }
     if (!stepCResult) { onError('Please map players first (Step C)'); return }
 
-    const startFrame = Math.floor(trimStartSeconds * videoMetadata.fps)
-    const endFrame = trimEndSeconds !== null
-      ? Math.floor(trimEndSeconds * videoMetadata.fps)
-      : videoMetadata.num_frames - 1
+    const startFrame = 0
+    const endFrame = videoMetadata.num_frames - 1
 
     onRunningStepChange('D', 'add')
     onError('')
@@ -218,7 +209,7 @@ export default function PipelineSteps({
     } finally {
       onRunningStepChange('D', 'remove')
     }
-  }, [videoMetadata, stepCResult, trimStartSeconds, trimEndSeconds, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
+  }, [videoMetadata, stepCResult, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
 
   const loadPerFrameDiagnostic = useCallback(async () => {
     if (!videoMetadata) return
