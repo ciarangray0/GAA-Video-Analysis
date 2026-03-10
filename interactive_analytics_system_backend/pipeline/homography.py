@@ -30,6 +30,14 @@ from pipeline.config import OUT_W, OUT_H, K1
 from pipeline.schemas import PitchPoint, LineAnnotation
 from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
 
+# Use USAC_MAGSAC if available (OpenCV 4.5+); it handles >50% outlier ratios
+# better than standard RANSAC. Fall back gracefully on older OpenCV builds.
+_RANSAC_METHOD = getattr(cv2, 'USAC_MAGSAC', cv2.RANSAC)
+
+# Reprojection-error threshold (px) above which an anchor homography is
+# considered bad-quality and will be replaced by neighbour interpolation.
+_BAD_ANCHOR_THRESHOLD = 30.0
+
 # Pitch canvas dimensions (pixels) - the canonical coordinate space
 PITCH_CANVAS_W = OUT_W  # e.g., 850 pixels
 PITCH_CANVAS_H = OUT_H  # e.g., 1400 pixels
@@ -103,13 +111,24 @@ def compute_homography(
     H, _ = cv2.findHomography(
         pts_image.astype(np.float32),
         pts_pitch_canvas.astype(np.float32),
-        cv2.RANSAC,
+        _RANSAC_METHOD,
         5.0
     )
-    
+
+    # USAC_MAGSAC may return None when given the minimum 4 points (it needs an
+    # overdetermined system for its statistical framework).  Fall back to plain
+    # RANSAC in that case so the function stays robust to small point sets.
+    if H is None and _RANSAC_METHOD != cv2.RANSAC:
+        H, _ = cv2.findHomography(
+            pts_image.astype(np.float32),
+            pts_pitch_canvas.astype(np.float32),
+            cv2.RANSAC,
+            5.0
+        )
+
     if H is None:
         raise ValueError("Failed to compute homography")
-    
+
     return H
 
 
@@ -316,6 +335,9 @@ def compute_homographies_with_lines(
                 info['repr_max'] = round(float(np.max(errors)), 2)
             except Exception:
                 pass
+            info['quality'] = (
+                'good' if info.get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD else 'bad'
+            )
             computation_info[frame_idx] = info
         except ValueError as e:
             computation_info[frame_idx] = {
@@ -325,12 +347,35 @@ def compute_homographies_with_lines(
             }
             continue
 
+    # Post-processing: replace bad-anchor H matrices with an interpolated H
+    # from neighboring good anchors (mean reprojection error > _BAD_ANCHOR_THRESHOLD).
+    # This prevents a grossly wrong anchor H from poisoning ORB propagation.
+    sorted_frames = sorted(homographies.keys())
+    good_frames = [
+        f for f in sorted_frames
+        if computation_info.get(f, {}).get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD
+    ]
+    if good_frames:
+        for f in sorted_frames:
+            if computation_info.get(f, {}).get('repr_mean', float('inf')) > _BAD_ANCHOR_THRESHOLD:
+                left = [g for g in good_frames if g <= f]
+                right = [g for g in good_frames if g >= f]
+                if left and right:
+                    f_left, f_right = left[-1], right[0]
+                    if f_left == f_right:
+                        homographies[f] = homographies[f_left]
+                    else:
+                        alpha = (f - f_left) / (f_right - f_left)
+                        homographies[f] = (
+                            (1.0 - alpha) * homographies[f_left]
+                            + alpha * homographies[f_right]
+                        )
+                elif left:
+                    homographies[f] = homographies[left[-1]]
+                elif right:
+                    homographies[f] = homographies[right[0]]
+
     return homographies, computation_info
-
-
-# =============================================================================
-# LEGACY ALIASES - for backwards compatibility
-# =============================================================================
 
 # Alias for the primary mapping function
 map_pixel_to_distorted_pitch = map_pixel_to_pitch

@@ -32,9 +32,24 @@ def build_constrained_per_frame_H(
     end_frame: int,
     anchor_annotations: Dict[int, dict] = None,
     verbose: bool = False,
+    anchor_quality: Dict[int, float] = None,
+    quality_threshold: float = 30.0,
     **kwargs,
 ) -> Tuple[Dict[int, np.ndarray], dict]:
-    anchor_list = sorted(anchor_H.keys())
+    # Build the effective anchor set, filtering out bad-quality anchors when
+    # quality information is available.  This prevents a grossly wrong anchor H
+    # from being used as the starting point for ORB-propagated segments.
+    if anchor_quality is not None:
+        effective_anchor_H = {
+            k: v for k, v in anchor_H.items()
+            if anchor_quality.get(k, 0.0) <= quality_threshold
+        }
+        if not effective_anchor_H:
+            effective_anchor_H = anchor_H  # Fall back if all anchors are flagged bad
+    else:
+        effective_anchor_H = anchor_H
+
+    anchor_list = sorted(effective_anchor_H.keys())
     per_frame_H: Dict[int, np.ndarray] = {}
     analysis: dict = {}
 
@@ -52,7 +67,7 @@ def build_constrained_per_frame_H(
         anchor_end = (anchor_list[seg_i + 1]
                       if seg_i + 1 < len(anchor_list)
                       else end_frame)
-        H_start = anchor_H[anchor_start]
+        H_start = effective_anchor_H[anchor_start]
         n_seg   = anchor_end - anchor_start
 
         per_frame_H[anchor_start] = H_start
@@ -99,4 +114,14 @@ def build_constrained_per_frame_H(
                   f"ORB ok={fwd_ok}/{n_seg} fallback={fallback}")
 
     cap.release()
+
+    # Fill in any frames that precede the first (good) anchor by assigning
+    # that anchor's H directly.  This handles the case where anchor frame 0
+    # was filtered out as bad-quality and the first good anchor is later.
+    if anchor_list:
+        H_first = effective_anchor_H[anchor_list[0]]
+        for f in range(start_frame, anchor_list[0]):
+            if f not in per_frame_H:
+                per_frame_H[f] = H_first
+
     return per_frame_H, analysis

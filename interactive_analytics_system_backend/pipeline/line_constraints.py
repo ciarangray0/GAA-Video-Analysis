@@ -47,6 +47,10 @@ import cv2
 
 from pipeline.config import OUT_W, OUT_H
 
+# Use USAC_MAGSAC if available (OpenCV 4.5+); it handles >50% outlier ratios
+# better than standard RANSAC. Fall back gracefully on older OpenCV builds.
+_RANSAC_METHOD = getattr(cv2, 'USAC_MAGSAC', cv2.RANSAC)
+
 
 # =============================================================================
 # GAA Pitch Line Configuration
@@ -417,7 +421,7 @@ def compute_line_constrained_homography(
 
         if len(line_pts_img) >= min_line_pts_for_init:
             H_init, mask_init = cv2.findHomography(
-                line_pts_img, line_pts_canvas, cv2.RANSAC, ransac_threshold
+                line_pts_img, line_pts_canvas, _RANSAC_METHOD, ransac_threshold
             )
             if H_init is not None and mask_init is not None:
                 n_inliers = int(mask_init.sum())
@@ -434,11 +438,50 @@ def compute_line_constrained_homography(
         H_current, mask = cv2.findHomography(
             pts_image_keypoints,
             pts_canvas_keypoints,
-            cv2.RANSAC,
+            _RANSAC_METHOD,
             ransac_threshold
         )
+        # USAC_MAGSAC may return None for small point sets; fall back to RANSAC
+        if H_current is None and _RANSAC_METHOD != cv2.RANSAC:
+            H_current, mask = cv2.findHomography(
+                pts_image_keypoints,
+                pts_canvas_keypoints,
+                cv2.RANSAC,
+                ransac_threshold
+            )
         if H_current is None:
             raise ValueError("Failed to compute initial homography from keypoints")
+
+    # ── Step 1b: Iterative reprojection-based outlier removal ─────────────────
+    # Remove keypoints whose reprojection error exceeds 25 px (up to 3 passes).
+    # This makes the initial H robust when >50% of keypoints are outliers.
+    pts_img_clean = pts_image_keypoints.copy()
+    pts_can_clean = pts_canvas_keypoints.copy()
+    for _outlier_iter in range(3):
+        if len(pts_img_clean) < 4:
+            break
+        pts_h = np.column_stack([pts_img_clean, np.ones(len(pts_img_clean))])
+        projected = (H_current @ pts_h.T).T
+        projected = projected[:, :2] / projected[:, 2:3]
+        errors = np.sqrt(((projected - pts_can_clean) ** 2).sum(axis=1))
+        inlier_mask = errors < 25.0
+        n_inliers = int(inlier_mask.sum())
+        if n_inliers == len(pts_img_clean):
+            break  # No outliers remain
+        if n_inliers < 4:
+            break  # Would remove too many; keep current set
+        pts_img_clean = pts_img_clean[inlier_mask]
+        pts_can_clean = pts_can_clean[inlier_mask]
+        H_refined, _ = cv2.findHomography(
+            pts_img_clean, pts_can_clean, _RANSAC_METHOD, ransac_threshold
+        )
+        if H_refined is not None:
+            H_current = H_refined
+        else:
+            break
+    # Use the filtered keypoint set for subsequent line-constraint refinement
+    pts_image_keypoints = pts_img_clean
+    pts_canvas_keypoints = pts_can_clean
 
     # If no line annotations, return initial homography
     if not line_annotations:
@@ -508,7 +551,7 @@ def compute_line_constrained_homography(
         H_new, _ = cv2.findHomography(
             all_pts_image.astype(np.float32),
             all_pts_world.astype(np.float32),
-            cv2.RANSAC,
+            _RANSAC_METHOD,
             ransac_threshold
         )
 
@@ -558,9 +601,17 @@ def compute_initial_homography(
     H, _ = cv2.findHomography(
         pts_image.astype(np.float32),
         pts_canvas.astype(np.float32),
-        cv2.RANSAC,
+        _RANSAC_METHOD,
         ransac_threshold
     )
+    # USAC_MAGSAC may return None for small point sets; fall back to RANSAC
+    if H is None and _RANSAC_METHOD != cv2.RANSAC:
+        H, _ = cv2.findHomography(
+            pts_image.astype(np.float32),
+            pts_canvas.astype(np.float32),
+            cv2.RANSAC,
+            ransac_threshold
+        )
     if H is None:
         raise ValueError("Failed to compute homography")
     return H
