@@ -6,7 +6,7 @@ export const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  
 export const GAA_PITCH_WIDTH = 85.0
 export const GAA_PITCH_LENGTH = 140.0
 
-export const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }> = {
+export const AVAILABLE_LINES: Record<string, { label: string; y_meters?: number; x_meters?: number; orientation?: 'horizontal' | 'vertical' }> = {
   'endline_top': { label: 'End Line (Top)', y_meters: 0.0 },
   '13m_top': { label: '13m Line (Top)', y_meters: 13.0 },
   '20m_top': { label: '20m Line (Top)', y_meters: 20.0 },
@@ -18,6 +18,12 @@ export const AVAILABLE_LINES: Record<string, { label: string; y_meters: number }
   '20m_bottom': { label: '20m Line (Bottom)', y_meters: 120.0 },
   '13m_bottom': { label: '13m Line (Bottom)', y_meters: 127.0 },
   'endline_bottom': { label: 'End Line (Bottom)', y_meters: 140.0 },
+  'left_sideline':   { label: 'Left Sideline',            x_meters: 0.0,  orientation: 'vertical' },
+  'right_sideline':  { label: 'Right Sideline',           x_meters: 85.0, orientation: 'vertical' },
+  '13m_box_left':    { label: '13m Box Line (Left)',       x_meters: 33.0, orientation: 'vertical' },
+  '13m_box_right':   { label: '13m Box Line (Right)',      x_meters: 52.0, orientation: 'vertical' },
+  'small_arc_left':  { label: 'Small Arc Line (Left)',     x_meters: 29.5, orientation: 'vertical' },
+  'small_arc_right': { label: 'Small Arc Line (Right)',    x_meters: 55.5, orientation: 'vertical' },
 }
 
 export const GAA_PITCH_VERTICES: Record<string, [number, number]> = {

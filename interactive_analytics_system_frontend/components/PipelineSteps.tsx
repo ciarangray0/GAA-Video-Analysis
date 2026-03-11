@@ -90,6 +90,8 @@ export default function PipelineSteps({
   const [perFrameData, setPerFrameData] = useState<PerFrameMappingData | null>(null)
   const [loadingDiagnostic, setLoadingDiagnostic] = useState(false)
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
+  // Incremented each time step B completes, used to bust the browser image cache
+  const [stepBVersion, setStepBVersion] = useState(0)
 
   // Internal fetch wrapper that logs API calls
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
@@ -162,6 +164,7 @@ export default function PipelineSteps({
         info: data.info || {},
       }
       onStepBComplete(result, data.frames || [])
+      setStepBVersion(v => v + 1)
       onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['B'])
     } catch (err: any) {
@@ -319,12 +322,12 @@ export default function PipelineSteps({
                     </div>
                     <div>
                       <p className="thumb-sublabel">Warped</p>
-                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped`} alt={`Warped frame ${f}`} className="thumb-img" />
+                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
                     </div>
                     {stepCResult && (
                       <div>
                         <p className="thumb-sublabel">With Players</p>
-                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players`} alt={`Warped with players frame ${f}`} className="thumb-img" />
+                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players?v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
                       </div>
                     )}
                   </div>

@@ -47,11 +47,27 @@ TRACKS_DIR = DATA_DIR / "tracks"
 ANNOTATIONS_DIR = DATA_DIR / "annotations"
 
 
+def _restore_videos_from_disk() -> None:
+    """Repopulate store.videos from saved metadata files after a backend restart."""
+    for meta_path in VIDEOS_DIR.glob("*_meta.json"):
+        meta = _load_json(meta_path)
+        if meta is None:
+            continue
+        video_id = meta.get("video_id")
+        video_path = Path(meta.get("path", ""))
+        if not video_id or not video_path.exists():
+            continue
+        store.videos[video_id] = {k: v for k, v in meta.items() if k != "video_id"}
+    if store.videos:
+        logger.info(f"Restored {len(store.videos)} video(s) from disk on startup")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
     TRACKS_DIR.mkdir(parents=True, exist_ok=True)
     ANNOTATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _restore_videos_from_disk()
     yield
 
 
@@ -107,6 +123,10 @@ def validate_video_upload(file: UploadFile, content: bytes) -> None:
         raise HTTPException(status_code=400, detail="Only MP4 video files are accepted")
     if file.content_type and file.content_type not in ["video/mp4", "application/octet-stream"]:
         raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}. Expected video/mp4")
+
+
+def save_video_meta(video_id: str, meta: dict) -> None:
+    _save_json(VIDEOS_DIR / f"{video_id}_meta.json", {"video_id": video_id, **meta})
 
 
 def save_detections(video_id: str, detections: List[Detection]) -> None:
@@ -201,7 +221,7 @@ async def upload_video(file: UploadFile = File(...)):
         logger.error(f"Failed to process video {video_id}: {e}")
         raise HTTPException(status_code=400, detail="Failed to process video. Ensure it is a valid MP4 file.")
 
-    store.videos[video_id] = {
+    video_meta = {
         "path": str(video_path),
         "fps": metadata["fps"],
         "num_frames": metadata["num_frames"],
@@ -209,6 +229,8 @@ async def upload_video(file: UploadFile = File(...)):
         "height": metadata["height"],
         "duration_seconds": metadata["duration_seconds"],
     }
+    store.videos[video_id] = video_meta
+    save_video_meta(video_id, video_meta)
     logger.info(f"Uploaded video {video_id}: {metadata['num_frames']} frames at {metadata['fps']} fps")
 
     return VideoCreateResponse(

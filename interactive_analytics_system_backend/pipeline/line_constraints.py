@@ -79,8 +79,19 @@ GAA_PITCH_LINES = {
     "endline_bottom": 140.0,
 }
 
+# GAA pitch sideline X-values in meters (vertical lines running full pitch length)
+GAA_PITCH_SIDELINES = {
+    "left_sideline":   0.0,   # x = 0m (left boundary)
+    "right_sideline":  85.0,  # x = 85m (right boundary)
+    "13m_box_left":    33.0,  # x = 33m (left 13m box side)
+    "13m_box_right":   52.0,  # x = 52m (right 13m box side)
+    "small_arc_left":  29.5,  # x = 29.5m (left small arc side)
+    "small_arc_right": 55.5,  # x = 55.5m (right small arc side)
+}
+
 # Pitch dimensions
 PITCH_METERS_H = 140.0  # Total pitch height in meters
+PITCH_METERS_W = 85.0   # Total pitch width in meters
 
 
 def get_line_y_canvas(line_id: str) -> float:
@@ -104,6 +115,29 @@ def get_line_y_canvas(line_id: str) -> float:
     y_meters = GAA_PITCH_LINES[line_id]
     # Convert to canvas pixels (OUT_H pixels for PITCH_METERS_H meters)
     return y_meters / PITCH_METERS_H * OUT_H
+
+
+def get_sideline_x_canvas(line_id: str) -> float:
+    """
+    Get the X coordinate in canvas pixels for a sideline ID.
+
+    Args:
+        line_id: Sideline identifier (e.g., "left_sideline", "right_sideline")
+
+    Returns:
+        X coordinate in pitch canvas pixels
+
+    Raises:
+        ValueError: If line_id is not a recognised sideline
+    """
+    if line_id not in GAA_PITCH_SIDELINES:
+        raise ValueError(
+            f"Unknown sideline ID: {line_id}. "
+            f"Valid options: {list(GAA_PITCH_SIDELINES.keys())}"
+        )
+    x_meters = GAA_PITCH_SIDELINES[line_id]
+    # Convert to canvas pixels (OUT_W pixels for PITCH_METERS_W meters)
+    return x_meters / PITCH_METERS_W * OUT_W
 
 
 def get_available_lines() -> Dict[str, float]:
@@ -241,6 +275,76 @@ def generate_synthetic_correspondences(
     return pts_image, pts_world, weights
 
 
+def generate_synthetic_correspondences_vertical(
+    line_annotation: dict,
+    H_current: np.ndarray,
+    num_samples: int = 10,
+    clamp_y: bool = True
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generate synthetic point correspondences from a vertical sideline annotation.
+
+    The key insight: we know X_world exactly (from the sideline ID),
+    and estimate Y_world by projecting through the current homography.
+
+    Args:
+        line_annotation: Dict with keys:
+            - line_id: str (e.g., "left_sideline", "right_sideline")
+            - u1, v1: First point in image pixels
+            - u2, v2: Second point in image pixels
+        H_current: Current homography estimate (3x3 matrix)
+        num_samples: Number of points to sample along line
+        clamp_y: Whether to clamp Y to valid pitch range
+
+    Returns:
+        Tuple of:
+        - pts_image: Nx2 array of image points
+        - pts_world: Nx2 array of world points (canvas pixels)
+        - weights: N array of confidence weights
+
+    Raises:
+        ValueError: If line_id is not a recognised sideline
+        ValueError: If H_current is singular or invalid
+    """
+    # Get fixed X coordinate for this sideline
+    x_canvas_fixed = get_sideline_x_canvas(line_annotation['line_id'])
+
+    # Sample points along the line in image space
+    pts_image = sample_points_on_line(
+        line_annotation['u1'], line_annotation['v1'],
+        line_annotation['u2'], line_annotation['v2'],
+        num_samples
+    )
+
+    # Project through current homography to estimate Y coordinates
+    pts_homogeneous = np.hstack([pts_image, np.ones((len(pts_image), 1))])
+    pts_projected = (H_current @ pts_homogeneous.T).T
+
+    # Normalize homogeneous coordinates
+    w = pts_projected[:, 2:3]
+    if np.any(np.abs(w) < 1e-10):
+        raise ValueError("Homography projects some points to infinity")
+    pts_projected = pts_projected[:, :2] / w
+
+    # Extract estimated Y coordinates
+    y_estimated = pts_projected[:, 1]
+
+    # Optionally clamp Y to valid pitch range
+    if clamp_y:
+        y_estimated = np.clip(y_estimated, 0, OUT_H)
+
+    # Create world points: use FIXED X, estimated Y
+    pts_world = np.column_stack([
+        np.full(len(y_estimated), x_canvas_fixed),
+        y_estimated
+    ]).astype(np.float32)
+
+    # Generate confidence weights
+    weights = get_point_weights(num_samples)
+
+    return pts_image, pts_world, weights
+
+
 # =============================================================================
 # Line Validation
 # =============================================================================
@@ -253,13 +357,24 @@ def validate_line_annotation(
     """
     Validate a line annotation for geometric consistency.
 
-    Checks that the average projected Y of the line's endpoints is
-    reasonably close to the expected Y for that line.
+    For horizontal lines: checks that the average projected Y is close to
+    the expected Y for that line.
+    For vertical sidelines: checks that the average projected X is close to
+    the expected X for that sideline.
     """
-    try:
-        y_expected = get_line_y_canvas(line_annotation['line_id'])
-    except ValueError as e:
-        return False, str(e)
+    line_id = line_annotation['line_id']
+    is_vertical = line_id in GAA_PITCH_SIDELINES
+
+    if is_vertical:
+        try:
+            x_expected = get_sideline_x_canvas(line_id)
+        except ValueError as e:
+            return False, str(e)
+    else:
+        try:
+            y_expected = get_line_y_canvas(line_id)
+        except ValueError as e:
+            return False, str(e)
 
     p1 = np.array([line_annotation['u1'], line_annotation['v1'], 1.0])
     p2 = np.array([line_annotation['u2'], line_annotation['v2'], 1.0])
@@ -270,18 +385,29 @@ def validate_line_annotation(
     if abs(proj1[2]) < 1e-10 or abs(proj2[2]) < 1e-10:
         return False, "Line endpoints project to infinity"
 
-    y1 = proj1[1] / proj1[2]
-    y2 = proj2[1] / proj2[2]
-
-    # Only check average Y proximity to expected — not endpoint spread
-    y_avg = (y1 + y2) / 2
-    y_error = abs(y_avg - y_expected)
-    if y_error > y_tolerance_pixels * 1.5:
-        return False, (
-            f"Projected Y ({y_avg:.1f}px) is far from expected "
-            f"({y_expected:.1f}px) for line '{line_annotation['line_id']}'. "
-            f"Error: {y_error:.1f}px"
-        )
+    if is_vertical:
+        x1 = proj1[0] / proj1[2]
+        x2 = proj2[0] / proj2[2]
+        x_avg = (x1 + x2) / 2
+        x_error = abs(x_avg - x_expected)
+        if x_error > y_tolerance_pixels * 1.5:
+            return False, (
+                f"Projected X ({x_avg:.1f}px) is far from expected "
+                f"({x_expected:.1f}px) for sideline '{line_id}'. "
+                f"Error: {x_error:.1f}px"
+            )
+    else:
+        y1 = proj1[1] / proj1[2]
+        y2 = proj2[1] / proj2[2]
+        # Only check average Y proximity to expected — not endpoint spread
+        y_avg = (y1 + y2) / 2
+        y_error = abs(y_avg - y_expected)
+        if y_error > y_tolerance_pixels * 1.5:
+            return False, (
+                f"Projected Y ({y_avg:.1f}px) is far from expected "
+                f"({y_expected:.1f}px) for line '{line_id}'. "
+                f"Error: {y_error:.1f}px"
+            )
 
     return True, ""
 
@@ -513,9 +639,14 @@ def compute_line_constrained_homography(
 
         for line_ann in valid_lines:
             try:
-                pts_img, pts_world, weights = generate_synthetic_correspondences(
-                    line_ann, H_current, num_samples_per_line
-                )
+                if line_ann.get('line_id') in GAA_PITCH_SIDELINES:
+                    pts_img, pts_world, weights = generate_synthetic_correspondences_vertical(
+                        line_ann, H_current, num_samples_per_line
+                    )
+                else:
+                    pts_img, pts_world, weights = generate_synthetic_correspondences(
+                        line_ann, H_current, num_samples_per_line
+                    )
                 all_pts_image_synthetic.append(pts_img)
                 all_pts_world_synthetic.append(pts_world)
                 all_weights_synthetic.append(weights)
@@ -639,9 +770,14 @@ def preview_synthetic_points(
 
     for line_ann in line_annotations:
         try:
-            pts_img, pts_world, weights = generate_synthetic_correspondences(
-                line_ann, H, num_samples
-            )
+            if line_ann.get('line_id') in GAA_PITCH_SIDELINES:
+                pts_img, pts_world, weights = generate_synthetic_correspondences_vertical(
+                    line_ann, H, num_samples
+                )
+            else:
+                pts_img, pts_world, weights = generate_synthetic_correspondences(
+                    line_ann, H, num_samples
+                )
             for i in range(len(pts_img)):
                 results.append({
                     'image_point': (float(pts_img[i, 0]), float(pts_img[i, 1])),

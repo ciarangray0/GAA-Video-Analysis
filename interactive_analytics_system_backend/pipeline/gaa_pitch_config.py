@@ -69,4 +69,8 @@ GAA_PITCH_VERTICES = {
     "center_right": (85.0, 70.0),
 }
 
-
+# GAA pitch sideline X-values in meters (vertical lines)
+GAA_PITCH_SIDELINES = {
+    "left_sideline": 0.0,    # x = 0m (left boundary)
+    "right_sideline": 85.0,  # x = 85m (right boundary, GAA_PITCH_WIDTH)
+}

@@ -164,8 +164,12 @@ export default function AnchorFrameAnnotator({
         const x2 = line.u2 * imgScale
         const y2 = line.v2 * imgScale
 
+        const isVertical = AVAILABLE_LINES[line.line_id]?.orientation === 'vertical'
+        const lineColor = isVertical ? 'rgba(255, 165, 0, 0.7)' : 'rgba(0, 220, 255, 0.7)'
+        const crosshairColor = isVertical ? '#ffa500' : '#00dcff'
+
         ctx.save()
-        ctx.strokeStyle = 'rgba(0, 220, 255, 0.7)'
+        ctx.strokeStyle = lineColor
         ctx.lineWidth = 1
         ctx.setLineDash([5, 4])
         ctx.beginPath()
@@ -176,8 +180,8 @@ export default function AnchorFrameAnnotator({
         ctx.restore()
 
         const labelText = AVAILABLE_LINES[line.line_id]?.label || line.line_id
-        drawCrosshair(ctx, x1, y1, '#00dcff')
-        drawCrosshair(ctx, x2, y2, '#00dcff', labelText)
+        drawCrosshair(ctx, x1, y1, crosshairColor)
+        drawCrosshair(ctx, x2, y2, crosshairColor, labelText)
       }
     }
 
@@ -600,7 +604,7 @@ export default function AnchorFrameAnnotator({
                 <select value={selectedLineId} onChange={(e) => setSelectedLineId(e.target.value)}>
                   {Object.entries(AVAILABLE_LINES).map(([id, info]) => (
                     <option key={id} value={id}>
-                      {info.label} (Y={info.y_meters}m)
+                      {info.label} {info.orientation === 'vertical' ? `(X=${info.x_meters}m)` : `(Y=${info.y_meters}m)`}
                     </option>
                   ))}
                 </select>
