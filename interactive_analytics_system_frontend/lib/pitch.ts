@@ -11,10 +11,33 @@ import {
   DISPLAY_SCALE,
 } from './constants'
 
+// Symmetric horizontal line pairs (top_y, bottom_y) in meters
+const PITCH_HORIZONTAL_LINES = [
+  [13, 127],
+  [20, 120],
+  [45,  95],
+  [65,  75],
+] as const
+
 export function pitchToCanvas(pitchX: number, pitchY: number): { x: number; y: number } {
-  const x = (pitchX / GAA_PITCH_WIDTH) * PITCH_DISPLAY_WIDTH
-  const y = (pitchY / GAA_PITCH_LENGTH) * PITCH_DISPLAY_HEIGHT
-  return { x, y }
+  return {
+    x: (pitchX / GAA_PITCH_WIDTH) * PITCH_DISPLAY_WIDTH,
+    y: (pitchY / GAA_PITCH_LENGTH) * PITCH_DISPLAY_HEIGHT,
+  }
+}
+
+function drawHorizontalLinePair(
+  ctx: CanvasRenderingContext2D,
+  y1: number,
+  y2: number,
+  width: number,
+): void {
+  ctx.beginPath()
+  ctx.moveTo(0, y1)
+  ctx.lineTo(width, y1)
+  ctx.moveTo(0, y2)
+  ctx.lineTo(width, y2)
+  ctx.stroke()
 }
 
 export function drawPitchDiagram(
@@ -44,49 +67,21 @@ export function drawPitchDiagram(
   ctx.lineTo(PITCH_DISPLAY_WIDTH, centerY)
   ctx.stroke()
 
-  // 13m lines
-  const line13Top = pitchToCanvas(0, 13).y
-  const line13Bottom = pitchToCanvas(0, 127).y
-  ctx.beginPath()
-  ctx.moveTo(0, line13Top)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line13Top)
-  ctx.moveTo(0, line13Bottom)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line13Bottom)
-  ctx.stroke()
-
-  // 20m lines
-  const line20Top = pitchToCanvas(0, 20).y
-  const line20Bottom = pitchToCanvas(0, 120).y
-  ctx.beginPath()
-  ctx.moveTo(0, line20Top)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line20Top)
-  ctx.moveTo(0, line20Bottom)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line20Bottom)
-  ctx.stroke()
-
-  // 45m lines
-  const line45Top = pitchToCanvas(0, 45).y
-  const line45Bottom = pitchToCanvas(0, 95).y
-  ctx.beginPath()
-  ctx.moveTo(0, line45Top)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line45Top)
-  ctx.moveTo(0, line45Bottom)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line45Bottom)
-  ctx.stroke()
-
-  // 65m lines
-  const line65Top = pitchToCanvas(0, 65).y
-  const line65Bottom = pitchToCanvas(0, 75).y
-  ctx.beginPath()
-  ctx.moveTo(0, line65Top)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line65Top)
-  ctx.moveTo(0, line65Bottom)
-  ctx.lineTo(PITCH_DISPLAY_WIDTH, line65Bottom)
-  ctx.stroke()
+  // Horizontal line pairs (13m, 20m, 45m, 65m)
+  for (const [top, bottom] of PITCH_HORIZONTAL_LINES) {
+    drawHorizontalLinePair(
+      ctx,
+      pitchToCanvas(0, top).y,
+      pitchToCanvas(0, bottom).y,
+      PITCH_DISPLAY_WIDTH,
+    )
+  }
 
   // 13m box vertical lines
   const box13Left = pitchToCanvas(33, 0).x
   const box13Right = pitchToCanvas(52, 0).x
+  const line13Top = pitchToCanvas(0, 13).y
+  const line13Bottom = pitchToCanvas(0, 127).y
   ctx.beginPath()
   ctx.moveTo(box13Left, 0)
   ctx.lineTo(box13Left, line13Top)
@@ -117,7 +112,7 @@ export function drawPitchDiagram(
   const currentAnchor = anchorFrames[currentAnchorIdx]
   const annotatedIds = currentAnchor ? currentAnchor.points.map(p => p.pitch_id) : []
 
-  // Highlight line segments when a pending click is waiting for a pitch point
+  // Highlight selectable line segments when awaiting a pitch point click
   if (pendingFrameClick) {
     ctx.strokeStyle = 'rgba(255, 255, 100, 0.4)'
     ctx.lineWidth = 6
@@ -137,17 +132,9 @@ export function drawPitchDiagram(
   for (const [id, coords] of Object.entries(GAA_PITCH_VERTICES)) {
     const pos = pitchToCanvas(coords[0], coords[1])
     const isAnnotated = annotatedIds.includes(id)
-
     ctx.beginPath()
     ctx.arc(pos.x, pos.y, 6, 0, 2 * Math.PI)
-
-    if (isAnnotated) {
-      ctx.fillStyle = '#00ff00'
-    } else if (pendingFrameClick) {
-      ctx.fillStyle = '#ffff00'
-    } else {
-      ctx.fillStyle = '#ff6600'
-    }
+    ctx.fillStyle = isAnnotated ? '#00ff00' : pendingFrameClick ? '#ffff00' : '#ff6600'
     ctx.fill()
     ctx.strokeStyle = '#ffffff'
     ctx.lineWidth = 2
@@ -190,65 +177,38 @@ export function drawPitch(
   ctx.lineWidth = 2
   ctx.strokeRect(2, 2, W - 4, H - 4)
 
-  // Center line
+  // Center line and circle
   ctx.beginPath()
   ctx.moveTo(0, H / 2)
   ctx.lineTo(W, H / 2)
   ctx.stroke()
 
-  // Center circle
   ctx.beginPath()
   ctx.arc(W / 2, H / 2, 40 * DISPLAY_SCALE, 0, 2 * Math.PI)
   ctx.stroke()
 
+  // Symmetric horizontal line pairs (13m, 20m, 45m)
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
   ctx.lineWidth = 1
+  for (const y_m of [13, 20, 45] as const) {
+    drawHorizontalLinePair(
+      ctx,
+      (y_m / GAA_PITCH_LENGTH) * H,
+      ((GAA_PITCH_LENGTH - y_m) / GAA_PITCH_LENGTH) * H,
+      W,
+    )
+  }
 
-  // 13m lines
-  const line13mTop = (13 / GAA_PITCH_LENGTH) * H
-  const line13mBottom = ((GAA_PITCH_LENGTH - 13) / GAA_PITCH_LENGTH) * H
-  ctx.beginPath()
-  ctx.moveTo(0, line13mTop)
-  ctx.lineTo(W, line13mTop)
-  ctx.moveTo(0, line13mBottom)
-  ctx.lineTo(W, line13mBottom)
-  ctx.stroke()
-
-  // 20m lines
-  const line20mTop = (20 / GAA_PITCH_LENGTH) * H
-  const line20mBottom = ((GAA_PITCH_LENGTH - 20) / GAA_PITCH_LENGTH) * H
-  ctx.beginPath()
-  ctx.moveTo(0, line20mTop)
-  ctx.lineTo(W, line20mTop)
-  ctx.moveTo(0, line20mBottom)
-  ctx.lineTo(W, line20mBottom)
-  ctx.stroke()
-
-  // 45m lines
-  const line45mTop = (45 / GAA_PITCH_LENGTH) * H
-  const line45mBottom = ((GAA_PITCH_LENGTH - 45) / GAA_PITCH_LENGTH) * H
-  ctx.beginPath()
-  ctx.moveTo(0, line45mTop)
-  ctx.lineTo(W, line45mTop)
-  ctx.moveTo(0, line45mBottom)
-  ctx.lineTo(W, line45mBottom)
-  ctx.stroke()
-
-  // Filter positions for this frame
   const framePositions = positions.filter(p => p.frame_idx === frame)
 
-  const outOfBounds = framePositions.filter(p =>
-    p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W ||
-    p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H
+  const outOfBounds = framePositions.filter(
+    p => p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H,
   )
   if (outOfBounds.length > 0) {
     console.warn(`Frame ${frame}: ${outOfBounds.length} out-of-bounds positions:`, outOfBounds)
   }
 
-  const getPlayerColor = (trackId: number): string => {
-    const hue = (trackId * 137.508) % 360
-    return `hsl(${hue}, 70%, 50%)`
-  }
+  const getPlayerColor = (trackId: number): string => `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
 
   const padding = 8
   framePositions.forEach((pos) => {

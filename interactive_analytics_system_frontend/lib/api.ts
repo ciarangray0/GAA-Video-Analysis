@@ -1,4 +1,4 @@
-import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, PitchAnnotation } from '../types'
+import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation } from '../types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -26,23 +26,6 @@ export async function getDetections(videoId: string): Promise<any[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/detections`)
   if (!res.ok) return []
   return res.json()
-}
-
-export async function computeHomographies(
-  videoId: string,
-  annotations: PitchAnnotation[],
-): Promise<{ frames: number[]; info: Record<string, any> }> {
-  const res = await fetch(`${API_URL}/videos/${videoId}/homographies`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(annotations),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Homography computation failed')
-  }
-  const data = await res.json()
-  return { frames: data.frames || [], info: data.info || {} }
 }
 
 export async function computeHomographiesV2(

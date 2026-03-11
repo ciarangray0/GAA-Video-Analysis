@@ -28,7 +28,7 @@ import cv2
 
 from pipeline.config import OUT_W, OUT_H, K1
 from pipeline.schemas import PitchPoint, LineAnnotation
-from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
+from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES, GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
 
 # Use USAC_MAGSAC if available (OpenCV 4.5+); it handles >50% outlier ratios
 # better than standard RANSAC. Fall back gracefully on older OpenCV builds.
@@ -38,25 +38,12 @@ _RANSAC_METHOD = getattr(cv2, 'USAC_MAGSAC', cv2.RANSAC)
 # considered bad-quality and will be replaced by neighbour interpolation.
 _BAD_ANCHOR_THRESHOLD = 30.0
 
-# Pitch canvas dimensions (pixels) - the canonical coordinate space
-PITCH_CANVAS_W = OUT_W  # e.g., 850 pixels
-PITCH_CANVAS_H = OUT_H  # e.g., 1400 pixels
-
-# Pitch dimensions in meters (only used to compute normalized vertex positions)
-PITCH_METERS_W = 85.0
-PITCH_METERS_H = 140.0
-
-
 def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:
-    """
-    Internal helper: Convert pitch vertex coordinates from meters to canvas pixels.
+    """Convert pitch vertex coordinates (meters) to canvas pixels.
 
-    This is ONLY used when setting up the homography destination points.
-    All other code works in canvas pixels directly.
+    Only used when setting up homography destination points.
     """
-    x_px = x_m / PITCH_METERS_W * PITCH_CANVAS_W
-    y_px = y_m / PITCH_METERS_H * PITCH_CANVAS_H
-    return x_px, y_px
+    return x_m / GAA_PITCH_WIDTH * OUT_W, y_m / GAA_PITCH_LENGTH * OUT_H
 
 
 def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
@@ -376,21 +363,4 @@ def compute_homographies_with_lines(
                     homographies[f] = homographies[right[0]]
 
     return homographies, computation_info
-
-# Alias for the primary mapping function
-map_pixel_to_distorted_pitch = map_pixel_to_pitch
-
-def map_pixel_to_pitch_meters(x_img: float, y_img: float, H: np.ndarray) -> Tuple[float, float]:
-    """
-    DEPRECATED: This system uses pitch canvas pixels, not meters.
-
-    This function is kept for backwards compatibility but should not be used.
-    Use map_pixel_to_pitch() instead.
-    """
-    # Map to canvas pixels first
-    x_px, y_px = map_pixel_to_pitch(x_img, y_img, H)
-    # Convert canvas pixels to meters (for legacy code only)
-    x_m = x_px / PITCH_CANVAS_W * PITCH_METERS_W
-    y_m = y_px / PITCH_CANVAS_H * PITCH_METERS_H
-    return x_m, y_m
 
