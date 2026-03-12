@@ -156,6 +156,24 @@ def load_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
     return _deserialize_H(data) if data is not None else None
 
 
+def save_v3_anchor_homographies(video_id: str, h_dict: Dict[int, Any]) -> None:
+    _save_json(ANNOTATIONS_DIR / f"{video_id}_v3_anchor_homographies.json", _serialize_H(h_dict))
+
+
+def load_v3_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
+    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_v3_anchor_homographies.json")
+    return _deserialize_H(data) if data is not None else None
+
+
+def save_v3_homographies(video_id: str, h_dict: Dict[int, Any]) -> None:
+    _save_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json", _serialize_H(h_dict))
+
+
+def load_v3_homographies(video_id: str) -> Optional[Dict[int, Any]]:
+    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json")
+    return _deserialize_H(data) if data is not None else None
+
+
 def _serialise_ann_value(obj) -> Any:
     """Convert a PitchPoint/LineAnnotation or dict to a JSON-serialisable dict."""
     if hasattr(obj, "model_dump"):
@@ -192,9 +210,19 @@ def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Resp
     return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
 
-def find_nearest_homography(video_id: str, frame_idx: int):
-    """Return (H_matrix, anchor_frame_idx) for the nearest computed anchor frame."""
-    homographies = store.homographies_cache.get(video_id) or load_homographies(video_id)
+def find_nearest_homography(video_id: str, frame_idx: int, method: str = "v2"):
+    """Return (H_matrix, anchor_frame_idx) for the nearest computed anchor frame.
+
+    Args:
+        video_id:  Video identifier.
+        frame_idx: Target frame index.
+        method:    ``"v2"`` (default) or ``"v3"`` — selects which per-frame
+                   homography set to use.
+    """
+    if method == "v3":
+        homographies = store.v3_homographies_cache.get(video_id) or load_v3_homographies(video_id)
+    else:
+        homographies = store.homographies_cache.get(video_id) or load_homographies(video_id)
     if not homographies:
         return None, None
     nearest = min(homographies.keys(), key=lambda f: abs(f - frame_idx))
@@ -288,13 +316,23 @@ async def get_warped_frame(video_id: str, frame_idx: int):
 
 
 @app.get("/videos/{video_id}/frames/{frame_idx}/warped")
-async def get_warped_frame_any(video_id: str, frame_idx: int):
-    """Return a warped JPEG for any frame using the nearest anchor homography."""
+async def get_warped_frame_any(
+    video_id: str,
+    frame_idx: int,
+    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
+):
+    """Return a warped JPEG for any frame using the nearest anchor homography.
+
+    Use ``?method=v3`` to use the DLT-based v3 homographies instead of v2.
+    """
     video_info = _get_video_or_404(video_id)
 
-    H, _ = find_nearest_homography(video_id, frame_idx)
+    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
     if H is None:
-        raise HTTPException(status_code=400, detail="No homographies computed for this video")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {method} homographies computed for this video"
+        )
 
     try:
         response = _read_and_warp_frame(video_info["path"], frame_idx, H)
@@ -308,11 +346,15 @@ async def get_warped_frame_any(video_id: str, frame_idx: int):
 
 
 @app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_players")
-async def get_warped_frame_with_players(video_id: str, frame_idx: int):
+async def get_warped_frame_with_players(
+    video_id: str,
+    frame_idx: int,
+    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
+):
     """Return a warped JPEG with player positions drawn as coloured circles."""
     video_info = _get_video_or_404(video_id)
 
-    H, _ = find_nearest_homography(video_id, frame_idx)
+    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
     if H is None:
         raise HTTPException(status_code=400, detail="No homographies computed for this video")
 
@@ -451,6 +493,89 @@ async def compute_homographies_v2(
     logger.info(
         f"Computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
         f"for video {video_id} using {total_lines_used} line constraints"
+    )
+
+    return {
+        "frames": sorted(anchor_homographies.keys()),
+        "per_frame_count": len(per_frame_hs),
+        "info": {str(k): v for k, v in computation_info.items()},
+    }
+
+
+@app.post("/videos/{video_id}/homographies/v3")
+async def compute_homographies_v3(
+    video_id: str,
+    annotations: List[AnchorFrameAnnotation],
+    num_samples_per_line: int = Query(10, ge=2, le=50, description="Points to sample per line"),
+    ransac_iterations: int = Query(2000, ge=100, le=10000, description="RANSAC trials"),
+    ransac_threshold: float = Query(10.0, ge=1.0, le=50.0, description="Inlier threshold in canvas pixels"),
+    keypoint_weight: float = Query(3.0, ge=1.0, le=10.0, description="DLT row weight for full keypoints"),
+):
+    """
+    Compute homography matrices using genuine DLT line constraints (v3).
+
+    Unlike v2, each line annotation provides one-dimensional constraints
+    directly in the DLT system (one row per sample point) rather than
+    synthetic full-point correspondences that circularly depend on the
+    current H estimate.
+
+    Results are stored separately from v2 and do not overwrite them.
+    Per-frame Hs are propagated via ORB feature matching, same as v2.
+    """
+    from pipeline.homography import compute_homographies_with_lines_v3
+
+    video_info = _get_video_or_404(video_id)
+
+    annotations_dict = {
+        ann.frame_idx: {"keypoints": ann.points, "lines": ann.lines}
+        for ann in annotations
+    }
+
+    try:
+        anchor_homographies, computation_info = await asyncio.to_thread(
+            partial(
+                compute_homographies_with_lines_v3,
+                annotations_dict,
+                num_samples_per_line=num_samples_per_line,
+                ransac_iterations=ransac_iterations,
+                ransac_threshold=ransac_threshold,
+                keypoint_weight=keypoint_weight,
+            )
+        )
+    except Exception as e:
+        logger.error(f"v3 DLT homography computation failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"v3 homography computation failed: {str(e)}")
+
+    if not anchor_homographies:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid v3 homographies computed. Ensure at least one frame has line annotations."
+        )
+
+    store.v3_anchor_homographies_cache[video_id] = anchor_homographies
+    save_v3_anchor_homographies(video_id, anchor_homographies)
+    save_annotations(video_id, annotations_dict)
+
+    try:
+        per_frame_hs, _ = await asyncio.to_thread(
+            partial(
+                build_constrained_per_frame_H,
+                video_info["path"],
+                anchor_homographies,
+                start_frame=0,
+                end_frame=video_info["num_frames"] - 1,
+            )
+        )
+    except Exception as e:
+        logger.error(f"v3 per-frame H propagation failed for video {video_id}: {e}")
+        per_frame_hs = anchor_homographies
+
+    store.v3_homographies_cache[video_id] = per_frame_hs
+    save_v3_homographies(video_id, per_frame_hs)
+
+    logger.info(
+        f"v3 DLT: computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
+        f"for video {video_id}"
     )
 
     return {

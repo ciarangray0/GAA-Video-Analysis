@@ -41,7 +41,8 @@ Usage:
     )
 """
 
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
+from collections import defaultdict
 import numpy as np
 import cv2
 
@@ -789,4 +790,386 @@ def preview_synthetic_points(
             continue
 
     return results
+
+
+# =============================================================================
+# DLT-based homography with genuine line constraints (v3)
+# =============================================================================
+
+def _hartley_normalise(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute Hartley normalisation for a set of 2-D points.
+
+    Returns (T, pts_normalised) where T is the 3×3 transform such that
+    T @ [x, y, 1]^T gives the normalised point.  Normalised points have
+    their centroid at the origin and a mean distance of sqrt(2) from it.
+    """
+    cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+    dists = np.sqrt((pts[:, 0] - cx) ** 2 + (pts[:, 1] - cy) ** 2)
+    mean_dist = float(dists.mean())
+    if mean_dist < 1e-8:
+        mean_dist = 1.0
+    scale = np.sqrt(2.0) / mean_dist
+    T = np.array([
+        [scale, 0.0,   -scale * cx],
+        [0.0,   scale, -scale * cy],
+        [0.0,   0.0,    1.0       ],
+    ], dtype=np.float64)
+    pts_h = np.column_stack([pts, np.ones(len(pts))])
+    pts_n = (T @ pts_h.T).T[:, :2]
+    return T, pts_n
+
+
+def _dlt_solve(A: np.ndarray) -> np.ndarray:
+    """Solve the DLT system Ah = 0 via SVD.
+
+    Returns the 3×3 homography (last right-singular vector, reshaped and
+    normalised so H[2,2] = 1).
+    """
+    _, _, Vt = np.linalg.svd(A, full_matrices=True)
+    h = Vt[-1]
+    H = h.reshape(3, 3)
+    if abs(H[2, 2]) > 1e-10:
+        H = H / H[2, 2]
+    return H
+
+
+def _build_dlt_rows(
+    kp_img_n: np.ndarray,        # (K, 2) normalised image keypoints
+    kp_can_n: np.ndarray,        # (K, 2) normalised canvas keypoints
+    h_img_n: List[Tuple],        # [(u_n, v_n), ...] horizontal line samples
+    h_y_n: List[float],          # normalised canvas Y for each h sample
+    v_img_n: List[Tuple],        # [(u_n, v_n), ...] vertical line samples
+    v_x_n: List[float],          # normalised canvas X for each v sample
+    keypoint_weight: float,
+) -> np.ndarray:
+    """Build the coefficient matrix A for the DLT system Ah = 0.
+
+    Row ordering of h is [h11, h12, h13, h21, h22, h23, h31, h32, h33].
+
+    Full keypoint   → 2 rows (X-constraint + Y-constraint), both scaled by
+                      *keypoint_weight*.
+    Horizontal line → 1 row  (Y-constraint only, X is free).
+    Vertical line   → 1 row  (X-constraint only, Y is free).
+    """
+    rows = []
+    n_kp = len(kp_img_n)
+
+    for i in range(n_kp):
+        u, v = kp_img_n[i, 0], kp_img_n[i, 1]
+        x, y = kp_can_n[i, 0], kp_can_n[i, 1]
+        row_x = np.array([-u, -v, -1,  0,  0,  0,  x*u, x*v, x],  dtype=np.float64) * keypoint_weight
+        row_y = np.array([ 0,  0,  0, -u, -v, -1,  y*u, y*v, y],  dtype=np.float64) * keypoint_weight
+        rows.append(row_x)
+        rows.append(row_y)
+
+    for (u, v), y_n in zip(h_img_n, h_y_n):
+        rows.append(np.array([0, 0, 0, -u, -v, -1, y_n*u, y_n*v, y_n], dtype=np.float64))
+
+    for (u, v), x_n in zip(v_img_n, v_x_n):
+        rows.append(np.array([-u, -v, -1, 0, 0, 0, x_n*u, x_n*v, x_n], dtype=np.float64))
+
+    if not rows:
+        raise ValueError("No DLT rows — no constraints provided.")
+    return np.array(rows, dtype=np.float64)
+
+
+def compute_homography_dlt_with_lines(
+    keypoints_image: np.ndarray,
+    keypoints_canvas: np.ndarray,
+    line_annotations: List[dict],
+    num_samples_per_line: int = 10,
+    ransac_iterations: int = 2000,
+    ransac_threshold: float = 10.0,
+    keypoint_weight: float = 3.0,
+) -> Tuple[np.ndarray, dict]:
+    """Compute homography via Direct Linear Transform using line constraints.
+
+    Unlike ``compute_line_constrained_homography``, this function encodes each
+    line annotation as a genuine *one-dimensional* DLT constraint rather than
+    a synthetic full-point correspondence that circularly depends on the
+    current H.
+
+    Mathematical basis
+    ------------------
+    A horizontal line at known canvas Y gives one DLT row per sample point::
+
+        [0, 0, 0, -u, -v, -1,  Y·u,  Y·v, Y]  ·  h  = 0
+
+    A vertical line at known canvas X gives one DLT row per sample point::
+
+        [-u, -v, -1,  0,  0,  0,  X·u,  X·v, X]  ·  h  = 0
+
+    A full keypoint at (X, Y) gives *both* rows.
+
+    All coordinates are Hartley-normalised before the SVD solve and
+    denormalised afterwards.  RANSAC on top removes annotation noise.
+
+    Args:
+        keypoints_image:    Nx2 image-space keypoint coordinates (u, v).
+        keypoints_canvas:   Nx2 canvas keypoint coordinates (x, y).
+        line_annotations:   List of dicts with keys ``line_id``, ``u1``,
+                            ``v1``, ``u2``, ``v2``.
+        num_samples_per_line: Points sampled along each line segment.
+        ransac_iterations:  Number of RANSAC trials.
+        ransac_threshold:   Inlier distance threshold in canvas pixels.
+                            For keypoints: Euclidean error (both dims).
+                            For line samples: error in the constrained
+                            dimension only.
+        keypoint_weight:    Row-weight multiplier for full-keypoint rows.
+
+    Returns:
+        ``(H, info)`` where *H* is the 3×3 homography and *info* is a dict
+        with keys ``num_keypoints``, ``num_line_points``, ``num_lines``,
+        ``num_inliers``, ``converged``, ``repr_errors_keypoints``,
+        ``repr_errors_lines``, ``line_warnings``.
+
+    Raises:
+        ValueError: Fewer than 4 total equations.
+    """
+    keypoints_image  = np.asarray(keypoints_image,  dtype=np.float64)
+    keypoints_canvas = np.asarray(keypoints_canvas, dtype=np.float64)
+    n_kp = len(keypoints_image)
+    line_warnings: List[str] = []
+
+    # ── 1. Sample points from each line annotation ────────────────────────────
+    h_img_raw: List[Tuple[float, float]] = []   # (u, v) image coords
+    h_y_raw:   List[float]               = []   # known canvas Y (pixels)
+    h_line_ids: List[str]                = []
+
+    v_img_raw: List[Tuple[float, float]] = []   # (u, v) image coords
+    v_x_raw:   List[float]               = []   # known canvas X (pixels)
+    v_line_ids: List[str]                = []
+
+    for ann in line_annotations:
+        lid = ann['line_id']
+        pts = sample_points_on_line(
+            ann['u1'], ann['v1'], ann['u2'], ann['v2'], num_samples_per_line
+        )
+        if lid in GAA_PITCH_LINES:
+            try:
+                y_canvas = get_line_y_canvas(lid)
+            except ValueError as exc:
+                line_warnings.append(str(exc))
+                continue
+            for p in pts:
+                h_img_raw.append((float(p[0]), float(p[1])))
+                h_y_raw.append(y_canvas)
+                h_line_ids.append(lid)
+        elif lid in GAA_PITCH_SIDELINES:
+            try:
+                x_canvas = get_sideline_x_canvas(lid)
+            except ValueError as exc:
+                line_warnings.append(str(exc))
+                continue
+            for p in pts:
+                v_img_raw.append((float(p[0]), float(p[1])))
+                v_x_raw.append(x_canvas)
+                v_line_ids.append(lid)
+        else:
+            line_warnings.append(f"Unknown line_id '{lid}' — skipped")
+
+    n_h = len(h_img_raw)
+    n_v = len(v_img_raw)
+    n_eq = 2 * n_kp + n_h + n_v
+
+    if n_eq < 8:
+        line_warnings.append(
+            f"Only {n_eq} equations available (need ≥8 for a determined system). "
+            "Attempting least-norm DLT solve."
+        )
+    if n_eq < 4:
+        raise ValueError(
+            f"Too few constraints: {n_eq} equations from {n_kp} keypoints, "
+            f"{n_h} horizontal and {n_v} vertical line samples."
+        )
+
+    # ── 2. Hartley normalisation ──────────────────────────────────────────────
+    # Image: normalise all image points together.
+    all_img_pts_list = list(keypoints_image) if n_kp > 0 else []
+    if h_img_raw:
+        all_img_pts_list += [list(p) for p in h_img_raw]
+    if v_img_raw:
+        all_img_pts_list += [list(p) for p in v_img_raw]
+    all_img_pts = np.array(all_img_pts_list, dtype=np.float64)
+    T_img, _ = _hartley_normalise(all_img_pts)
+
+    # Canvas: normalise from keypoints when available; fall back to canvas size.
+    if n_kp > 0:
+        T_can, kp_can_n = _hartley_normalise(keypoints_canvas)
+    else:
+        cx_can, cy_can = OUT_W / 2.0, OUT_H / 2.0
+        scale_can = np.sqrt(2.0) / np.sqrt(cx_can ** 2 + cy_can ** 2)
+        T_can = np.array([
+            [scale_can, 0.0,        -scale_can * cx_can],
+            [0.0,       scale_can,  -scale_can * cy_can],
+            [0.0,       0.0,         1.0               ],
+        ], dtype=np.float64)
+        kp_can_n = np.empty((0, 2), dtype=np.float64)
+
+    T_can_inv = np.linalg.inv(T_can)
+
+    def _n_img(u: float, v: float) -> Tuple[float, float]:
+        p = T_img @ np.array([u, v, 1.0])
+        return float(p[0]), float(p[1])
+
+    def _n_can_y(y: float) -> float:
+        return float(T_can[1, 1] * y + T_can[1, 2])
+
+    def _n_can_x(x: float) -> float:
+        return float(T_can[0, 0] * x + T_can[0, 2])
+
+    kp_img_n = np.array([_n_img(u, v) for u, v in keypoints_image], dtype=np.float64) if n_kp > 0 else np.empty((0, 2))
+    h_img_n  = [_n_img(u, v) for u, v in h_img_raw]
+    h_y_n    = [_n_can_y(y)  for y   in h_y_raw   ]
+    v_img_n  = [_n_img(u, v) for u, v in v_img_raw ]
+    v_x_n    = [_n_can_x(x)  for x   in v_x_raw   ]
+
+    # ── 3. Helper: solve DLT for a subset and denormalise ─────────────────────
+    def _solve_subset(
+        kp_i: np.ndarray, kp_c: np.ndarray,
+        hi: List, hy: List, vi: List, vx: List,
+    ) -> Optional[np.ndarray]:
+        try:
+            A = _build_dlt_rows(kp_i, kp_c, hi, hy, vi, vx, keypoint_weight)
+            H_n = _dlt_solve(A)
+            H = T_can_inv @ H_n @ T_img
+            if abs(H[2, 2]) > 1e-10:
+                H = H / H[2, 2]
+            return H
+        except Exception:
+            return None
+
+    # ── 4. Base DLT solve using all data ─────────────────────────────────────
+    H_base = _solve_subset(kp_img_n, kp_can_n, h_img_n, h_y_n, v_img_n, v_x_n)
+    if H_base is None:
+        raise ValueError("Base DLT solve failed (SVD error or degenerate input).")
+
+    # ── 5. Inlier scoring helper ──────────────────────────────────────────────
+    def _score(H_cand: np.ndarray):
+        """Return (kp_mask, h_mask, v_mask, total_inliers) for un-normalised coords."""
+        kp_mask = np.zeros(n_kp, dtype=bool)
+        for i, (u, v) in enumerate(keypoints_image):
+            proj = H_cand @ np.array([u, v, 1.0])
+            if abs(proj[2]) < 1e-10:
+                continue
+            proj = proj / proj[2]
+            err = np.sqrt((proj[0] - keypoints_canvas[i, 0]) ** 2 +
+                          (proj[1] - keypoints_canvas[i, 1]) ** 2)
+            kp_mask[i] = err < ransac_threshold
+
+        h_mask = np.zeros(n_h, dtype=bool)
+        for i, ((u, v), y_known) in enumerate(zip(h_img_raw, h_y_raw)):
+            proj = H_cand @ np.array([u, v, 1.0])
+            if abs(proj[2]) < 1e-10:
+                continue
+            proj = proj / proj[2]
+            h_mask[i] = abs(proj[1] - y_known) < ransac_threshold
+
+        v_mask = np.zeros(n_v, dtype=bool)
+        for i, ((u, v), x_known) in enumerate(zip(v_img_raw, v_x_raw)):
+            proj = H_cand @ np.array([u, v, 1.0])
+            if abs(proj[2]) < 1e-10:
+                continue
+            proj = proj / proj[2]
+            v_mask[i] = abs(proj[0] - x_known) < ransac_threshold
+
+        total = int(kp_mask.sum()) + int(h_mask.sum()) + int(v_mask.sum())
+        return kp_mask, h_mask, v_mask, total
+
+    # ── 6. RANSAC loop ────────────────────────────────────────────────────────
+    best_H       = H_base
+    best_masks   = _score(H_base)
+    best_count   = best_masks[3]
+
+    # Minimum line samples per trial to reach 8 equations (with all keypoints).
+    eqs_from_kp         = 2 * n_kp
+    min_line_needed     = max(0, 8 - eqs_from_kp)
+    total_line_pts      = n_h + n_v
+    samples_per_trial   = max(min_line_needed, min(8, total_line_pts))
+
+    rng = np.random.default_rng(42)
+
+    for _ in range(ransac_iterations):
+        if total_line_pts == 0:
+            H_cand = _solve_subset(kp_img_n, kp_can_n, [], [], [], [])
+        else:
+            n_pick = min(samples_per_trial, total_line_pts)
+            all_line_idx = [(0, i) for i in range(n_h)] + [(1, i) for i in range(n_v)]
+            chosen = [all_line_idx[i] for i in rng.choice(len(all_line_idx), size=n_pick, replace=False)]
+
+            hi_sub = [h_img_n[i] for t, i in chosen if t == 0]
+            hy_sub = [h_y_n[i]   for t, i in chosen if t == 0]
+            vi_sub = [v_img_n[i] for t, i in chosen if t == 1]
+            vx_sub = [v_x_n[i]   for t, i in chosen if t == 1]
+
+            H_cand = _solve_subset(kp_img_n, kp_can_n, hi_sub, hy_sub, vi_sub, vx_sub)
+
+        if H_cand is None:
+            continue
+
+        masks = _score(H_cand)
+        if masks[3] > best_count:
+            best_count = masks[3]
+            best_H     = H_cand
+            best_masks = masks
+
+    # ── 7. Final refit on all inliers ────────────────────────────────────────
+    kp_in, h_in, v_in, _ = best_masks
+
+    kp_i_fin = kp_img_n[kp_in]   if n_kp > 0 else np.empty((0, 2))
+    kp_c_fin = kp_can_n[kp_in]   if n_kp > 0 else np.empty((0, 2))
+    hi_fin   = [h_img_n[i] for i in range(n_h) if h_in[i]]
+    hy_fin   = [h_y_n[i]   for i in range(n_h) if h_in[i]]
+    vi_fin   = [v_img_n[i] for i in range(n_v) if v_in[i]]
+    vx_fin   = [v_x_n[i]   for i in range(n_v) if v_in[i]]
+
+    n_fin_eq = 2 * int(kp_in.sum()) + len(hi_fin) + len(vi_fin)
+    if n_fin_eq >= 4:
+        H_final = _solve_subset(kp_i_fin, kp_c_fin, hi_fin, hy_fin, vi_fin, vx_fin)
+        if H_final is None:
+            H_final = best_H
+    else:
+        H_final = best_H
+
+    # ── 8. Diagnostics ────────────────────────────────────────────────────────
+    repr_errors_kp: List[float] = []
+    for i, (u, v) in enumerate(keypoints_image):
+        proj = H_final @ np.array([u, v, 1.0])
+        if abs(proj[2]) > 1e-10:
+            proj = proj / proj[2]
+            err = float(np.sqrt((proj[0] - keypoints_canvas[i, 0]) ** 2 +
+                                (proj[1] - keypoints_canvas[i, 1]) ** 2))
+        else:
+            err = float('inf')
+        repr_errors_kp.append(round(err, 2))
+
+    line_errs: Dict[str, List[float]] = defaultdict(list)
+    for i, ((u, v), y_known, lid) in enumerate(zip(h_img_raw, h_y_raw, h_line_ids)):
+        if not h_in[i]:
+            continue
+        proj = H_final @ np.array([u, v, 1.0])
+        if abs(proj[2]) > 1e-10:
+            proj = proj / proj[2]
+            line_errs[lid].append(abs(float(proj[1]) - y_known))
+    for i, ((u, v), x_known, lid) in enumerate(zip(v_img_raw, v_x_raw, v_line_ids)):
+        if not v_in[i]:
+            continue
+        proj = H_final @ np.array([u, v, 1.0])
+        if abs(proj[2]) > 1e-10:
+            proj = proj / proj[2]
+            line_errs[lid].append(abs(float(proj[0]) - x_known))
+
+    repr_errors_lines = {lid: round(float(np.mean(errs)), 2) for lid, errs in line_errs.items()}
+
+    info: dict = {
+        'num_keypoints':         n_kp,
+        'num_line_points':       n_h + n_v,
+        'num_lines':             len(line_annotations),
+        'num_inliers':           int(best_count),
+        'converged':             True,
+        'repr_errors_keypoints': repr_errors_kp,
+        'repr_errors_lines':     repr_errors_lines,
+        'line_warnings':         line_warnings,
+    }
+    return H_final, info
 
