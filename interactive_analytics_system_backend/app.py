@@ -165,13 +165,14 @@ def load_v3_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
     return _deserialize_H(data) if data is not None else None
 
 
-def save_v3_homographies(video_id: str, h_dict: Dict[int, Any]) -> None:
+def save_v3_homographies(video_id: str, h_dict: Dict[int, np.ndarray]) -> None:
     _save_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json", _serialize_H(h_dict))
 
 
-def load_v3_homographies(video_id: str) -> Optional[Dict[int, Any]]:
+def load_v3_homographies(video_id: str) -> Optional[Dict[int, np.ndarray]]:
     data = _load_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json")
     return _deserialize_H(data) if data is not None else None
+
 
 
 def _serialise_ann_value(obj) -> Any:
@@ -507,9 +508,9 @@ async def compute_homographies_v3(
     video_id: str,
     annotations: List[AnchorFrameAnnotation],
     num_samples_per_line: int = Query(10, ge=2, le=50, description="Points to sample per line"),
-    ransac_iterations: int = Query(2000, ge=100, le=10000, description="RANSAC trials"),
-    ransac_threshold: float = Query(10.0, ge=1.0, le=50.0, description="Inlier threshold in canvas pixels"),
-    keypoint_weight: float = Query(3.0, ge=1.0, le=10.0, description="DLT row weight for full keypoints"),
+    ransac_iterations: int = Query(2000, ge=100, le=10000, description="RANSAC trials for keypoint-only H₀"),
+    ransac_threshold: float = Query(5.0, ge=1.0, le=50.0, description="RANSAC inlier threshold in canvas pixels"),
+    keypoint_weight: float = Query(20.0, ge=1.0, le=100.0, description="Weight multiplier for keypoints vs line samples (higher = lines reinforce more gently)"),
 ):
     """
     Compute homography matrices using genuine DLT line constraints (v3).
@@ -683,17 +684,22 @@ async def get_anchor_quality(video_id: str):
     """
     Compute per-keypoint reprojection error for each anchor frame.
 
-    Requires that /homographies/v2 has been called first.
+    Works with both v2 and v3 anchor homographies (v2 takes priority if both exist).
     """
     _get_video_or_404(video_id)
 
     annotations = load_annotations(video_id)
     if annotations is None:
-        raise HTTPException(status_code=400, detail="No annotations found. Compute homographies (v2) first.")
+        raise HTTPException(status_code=400, detail="No annotations found. Compute homographies first.")
 
-    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    anchor_hs = (
+        store.anchor_homographies_cache.get(video_id)
+        or load_anchor_homographies(video_id)
+        or store.v3_anchor_homographies_cache.get(video_id)
+        or load_v3_anchor_homographies(video_id)
+    )
     if not anchor_hs:
-        raise HTTPException(status_code=400, detail="No anchor homographies found. Compute homographies (v2) first.")
+        raise HTTPException(status_code=400, detail="No anchor homographies found. Compute homographies first.")
 
     def _to_canvas(pitch_id: str):
         x_m, y_m = resolve_pitch_coordinates(pitch_id)

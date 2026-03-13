@@ -1,84 +1,105 @@
 """Homography computation and pixel-to-pitch mapping.
 
-Canonical Coordinate System:
-============================
-This system uses a FIXED TOP-DOWN PITCH CANVAS in PIXELS as the primary
-coordinate space. This matches the original research notebook exactly.
+Coordinate System:
+    Image pixels (camera) → Homography H → Pitch canvas pixels → Radial distortion → Output
 
-    Image pixels (camera) → Homography → Pitch canvas pixels → Distortion → Output
-
-The pitch canvas is a fixed size (e.g., 850 × 1400 pixels) used for:
-    - Visualization
-    - Analysis
-    - Interpolation
-    - All downstream processing
-
-IMPORTANT:
-- Meters are NOT used in this pipeline
-- Radial distortion is ALWAYS applied
-- All player positions are in pitch canvas pixels
-- Interpolation happens in pitch-pixel space
-
-This design prioritizes visual correctness over physical/metric correctness.
+The pitch canvas is OUT_W × OUT_H pixels (850 × 1400).  Meters are never used
+after the destination points are set up.  Radial distortion (K1) is always applied.
 """
 import re
-from typing import Tuple, Dict, List
-import numpy as np
+from typing import Dict, List, Optional, Tuple
+
 import cv2
+import numpy as np
 
-from pipeline.config import OUT_W, OUT_H, K1
-from pipeline.schemas import PitchPoint, LineAnnotation
-from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES, GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
+from pipeline.config import K1, OUT_H, OUT_W
+from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
+from pipeline.schemas import LineAnnotation, PitchPoint
 
-# Use USAC_MAGSAC if available (OpenCV 4.5+); it handles >50% outlier ratios
-# better than standard RANSAC. Fall back gracefully on older OpenCV builds.
-_RANSAC_METHOD = getattr(cv2, 'USAC_MAGSAC', cv2.RANSAC)
+_PITCH_M_W = 85.0
+_PITCH_M_H = 140.0
 
-# Reprojection-error threshold (px) above which an anchor homography is
-# considered bad-quality and will be replaced by neighbour interpolation.
-_BAD_ANCHOR_THRESHOLD = 30.0
 
-# v3: canvas-Y boundary separating near-side (reliable) from far-side (validated).
-# 300 px ≈ 30 m from the near goal — covers endline, 13m-box, 20m features.
-_NEAR_SIDE_Y_PX = 300.0
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:
-    """Convert pitch vertex coordinates (meters) to canvas pixels.
+    """Convert pitch vertex coordinates (meters) to canvas pixels."""
+    return x_m / _PITCH_M_W * OUT_W, y_m / _PITCH_M_H * OUT_H
 
-    Only used when setting up homography destination points.
+
+def _compute_coverage_score(
+    pts_image: np.ndarray,
+    img_w: int,
+    img_h: int,
+    grid_cols: int = 3,
+    grid_rows: int = 2,
+) -> float:
+    """Return fraction of grid cells containing ≥1 keypoint (0.0–1.0).
+
+    Divides the frame into a grid_cols × grid_rows grid and counts how many
+    cells are occupied.  Higher = better spatial spread of annotations.
     """
-    return x_m / GAA_PITCH_WIDTH * OUT_W, y_m / GAA_PITCH_LENGTH * OUT_H
+    if len(pts_image) == 0 or img_w == 0 or img_h == 0:
+        return 0.0
+    occupied = set()
+    for x, y in pts_image:
+        col = min(int(x / img_w * grid_cols), grid_cols - 1)
+        row = min(int(y / img_h * grid_rows), grid_rows - 1)
+        occupied.add((col, row))
+    return round(len(occupied) / (grid_cols * grid_rows), 2)
 
 
-def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
-    """
-    Resolve a pitch_id string to (x_meters, y_meters) coordinates.
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    Supports two formats:
-    1. Named vertex: pitch_id must be a key in GAA_PITCH_VERTICES.
-       Returns the stored (x, y) tuple in meters.
-    2. Line point: pitch_id matches ``line_{name}_x{X}_y{Y}`` where X and Y
-       are floating-point meter values (e.g. ``line_45m_top_x25.3_y45.0``).
-       Returns (float(X), float(Y)).
+def _hartley_normalize(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Normalize points so centroid = origin and mean distance from origin = √2.
+
+    This is the standard Hartley normalization required before building a DLT
+    matrix. Without it, products of image coords (0–1440) × canvas coords
+    (0–1400) reach ~2M, making the SVD numerically unstable.
 
     Args:
-        pitch_id: Vertex name or encoded line-point identifier.
+        pts: Nx2 array of 2D points.
 
     Returns:
-        Tuple of (x_meters, y_meters) in pitch coordinate space (meters).
+        (pts_normalized, T) where T is the 3×3 normalization transform such
+        that pts_normalized = (T @ homogeneous(pts).T).T[:, :2].
+    """
+    centroid = pts.mean(axis=0)
+    shifted = pts - centroid
+    mean_dist = np.sqrt((shifted ** 2).sum(axis=1)).mean()
+    if mean_dist < 1e-8:
+        return pts.copy(), np.eye(3, dtype=np.float64)
+    scale = np.sqrt(2.0) / mean_dist
+    T = np.array([
+        [scale, 0.0,   -scale * centroid[0]],
+        [0.0,   scale, -scale * centroid[1]],
+        [0.0,   0.0,    1.0],
+    ], dtype=np.float64)
+    pts_h = np.column_stack([pts, np.ones(len(pts))])
+    pts_n = (T @ pts_h.T).T[:, :2]
+    return pts_n.astype(np.float64), T
 
-    Raises:
-        ValueError: If pitch_id is not a known vertex name and does not match
-                    the ``line_{name}_x{X}_y{Y}`` pattern.
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
+    """Return (x_meters, y_meters) for a pitch_id.
+
+    Accepts named vertices from GAA_PITCH_VERTICES or the encoded format
+    ``line_<name>_x<X>_y<Y>``.
     """
     if pitch_id in GAA_PITCH_VERTICES:
         return GAA_PITCH_VERTICES[pitch_id]
-
-    # Try to parse line_{name}_x{X}_y{Y} format
     match = re.match(r'^line_.+_x([-\d.]+)_y([-\d.]+)$', pitch_id)
     if match:
         return float(match.group(1)), float(match.group(2))
-
     raise ValueError(
         f"Unrecognized pitch_id: '{pitch_id}'. "
         "Must be a known vertex name or follow the 'line_<name>_x<X>_y<Y>' format."
@@ -87,39 +108,17 @@ def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
 
 def compute_homography(
     pts_image: np.ndarray,
-    pts_pitch_canvas: np.ndarray
+    pts_pitch_canvas: np.ndarray,
 ) -> np.ndarray:
-    """
-    Compute homography matrix from image points to pitch canvas points.
-
-    Args:
-        pts_image: Nx2 array of image coordinates (x_img, y_img) in camera pixels
-        pts_pitch_canvas: Nx2 array of pitch canvas coordinates (x, y) in pixels
-
-    Returns:
-        3x3 homography matrix that maps: image pixels → pitch canvas pixels
-    """
+    """Compute a 3×3 homography matrix (image pixels → pitch canvas pixels)."""
     H, _ = cv2.findHomography(
         pts_image.astype(np.float32),
         pts_pitch_canvas.astype(np.float32),
-        _RANSAC_METHOD,
-        5.0
+        cv2.RANSAC,
+        5.0,
     )
-
-    # USAC_MAGSAC may return None when given the minimum 4 points (it needs an
-    # overdetermined system for its statistical framework).  Fall back to plain
-    # RANSAC in that case so the function stays robust to small point sets.
-    if H is None and _RANSAC_METHOD != cv2.RANSAC:
-        H, _ = cv2.findHomography(
-            pts_image.astype(np.float32),
-            pts_pitch_canvas.astype(np.float32),
-            cv2.RANSAC,
-            5.0
-        )
-
     if H is None:
         raise ValueError("Failed to compute homography")
-
     return H
 
 
@@ -127,32 +126,15 @@ def map_pixel_to_pitch(
     x_img: float,
     y_img: float,
     H: np.ndarray,
-    out_w: int = None,
-    out_h: int = None,
-    k1: float = None
+    out_w: Optional[int] = None,
+    out_h: Optional[int] = None,
+    k1: Optional[float] = None,
 ) -> Tuple[float, float]:
-    """
-    Map an image pixel to pitch canvas coordinates WITH radial distortion.
+    """Map an image pixel → pitch canvas coordinates with radial distortion.
 
-    This is the PRIMARY mapping function. It reproduces the notebook's
-    map_pixel_to_distorted_pitch() exactly:
-
+    Steps:
         1. Apply homography: image pixels → pitch canvas pixels
-        2. Apply radial distortion (ALWAYS, not optional)
-
-    The output is the canonical player position used for all visualization
-    and analysis.
-
-    Args:
-        x_img: Image x coordinate (camera pixels)
-        y_img: Image y coordinate (camera pixels)
-        H: 3x3 homography matrix (image → pitch canvas)
-        out_w: Pitch canvas width (defaults to OUT_W)
-        out_h: Pitch canvas height (defaults to OUT_H)
-        k1: Radial distortion coefficient (defaults to K1)
-
-    Returns:
-        Tuple of (x_pitch, y_pitch) in PITCH CANVAS PIXELS (with distortion)
+        2. Apply radial distortion (always applied, matches research notebook)
     """
     if out_w is None:
         out_w = OUT_W
@@ -161,588 +143,358 @@ def map_pixel_to_pitch(
     if k1 is None:
         k1 = K1
 
-    # Step 1: Apply homography (image pixels → pitch canvas pixels)
     p = np.array([x_img, y_img, 1.0], dtype=np.float32)
     pitch = H @ p
-    pitch /= pitch[2]  # Normalize homogeneous coordinates
+    pitch /= pitch[2]
+    x, y = float(pitch[0]), float(pitch[1])
 
-    x, y = pitch[0], pitch[1]
-
-    # Step 2: Apply radial distortion (ALWAYS - this is NOT optional)
-    # This compensates for perspective effects and matches notebook output
     cx, cy = out_w / 2.0, out_h / 2.0
-    dx = x - cx
-    dy = y - cy
+    dx, dy = x - cx, y - cy
     r2 = dx * dx + dy * dy
-
-    x_d = x + dx * k1 * r2
-    y_d = y + dy * k1 * r2
-
-    return float(x_d), float(y_d)
+    return x + dx * k1 * r2, y + dy * k1 * r2
 
 
-def compute_homographies_from_annotations(
-    annotations: Dict[int, List[PitchPoint]]
-) -> Dict[int, np.ndarray]:
-    """
-    Compute homography matrices for anchor frames from pitch annotations.
+def _fill_info(
+    computation_info: dict,
+    frame_idx: int,
+    H: np.ndarray,
+    keypoints,
+    pts_image: np.ndarray,
+    pts_canvas: np.ndarray,
+    valid_lines: int,
+    n_line_pts: int,
+    img_width: Optional[int],
+    img_height: Optional[int],
+) -> None:
+    """Populate computation_info[frame_idx] with reprojection errors and quality."""
+    kp_errors: List[float] = []
+    kp_details = []
+    for kp, img_pt, can_pt in zip(keypoints, pts_image, pts_canvas):
+        proj = H @ np.array([img_pt[0], img_pt[1], 1.0])
+        proj /= proj[2]
+        err = float(np.sqrt((proj[0] - can_pt[0]) ** 2 + (proj[1] - can_pt[1]) ** 2))
+        kp_errors.append(err)
+        kp_details.append({
+            "pitch_id": kp.pitch_id,
+            "error_px": round(err, 2),
+            "verdict": "outlier" if err > 30 else "high" if err > 15 else "good",
+        })
 
-    Each homography maps: image pixels → pitch canvas pixels
+    mean_err = float(np.mean(kp_errors)) if kp_errors else 0.0
+    n_outliers = sum(1 for e in kp_errors if e > 30)
+    coverage = (
+        _compute_coverage_score(pts_image, img_width, img_height)
+        if img_width and img_height else None
+    )
 
-    The pitch vertices (from GAA_PITCH_VERTICES) are defined in meters,
-    but we convert them to canvas pixels for the homography computation.
-
-    Args:
-        annotations: Dict mapping frame_idx to list of PitchPoint objects
-                    Each PitchPoint has: pitch_id, x_img, y_img
-
-    Returns:
-        Dict mapping frame_idx to 3x3 homography matrix
-        The homography transforms: image pixels → pitch canvas pixels
-    """
-    homographies = {}
-    
-    for frame_idx, points in annotations.items():
-        if len(points) < 4:
-            continue
-        
-        # Extract image points (camera pixels)
-        pts_image = np.array([
-            [p.x_img, p.y_img] for p in points
-        ], dtype=np.float32)
-        
-        # Extract pitch points from pitch_id and convert to canvas pixels
-        # GAA_PITCH_VERTICES are in meters, we convert to canvas pixels
-        pts_pitch_canvas = np.array([
-            _meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id))
-            for p in points
-        ], dtype=np.float32)
-        
-        # Compute homography: image pixels → pitch canvas pixels
-        try:
-            H = compute_homography(pts_image, pts_pitch_canvas)
-            homographies[frame_idx] = H
-        except ValueError:
-            continue
-    
-    return homographies
+    computation_info[frame_idx] = {
+        "num_keypoints": len(kp_details),
+        "keypoints": kp_details,
+        "repr_mean": round(mean_err, 2) if kp_errors else None,
+        "repr_max": round(float(np.max(kp_errors)), 2) if kp_errors else None,
+        "coverage": coverage,
+        "valid_lines": valid_lines,
+        "synthetic_points": n_line_pts,
+        "quality": (
+            "bad" if (n_outliers > 0 or mean_err > 30)
+            else "warning" if (mean_err > 15 or (coverage is not None and coverage < 0.5))
+            else "good"
+        ),
+    }
 
 
 def compute_homographies_with_lines(
     annotations: Dict[int, Dict],
     num_samples_per_line: int = 10,
     max_iterations: int = 3,
-    keypoint_weight: int = 3
+    keypoint_weight: int = 3,
+    img_width: Optional[int] = None,
+    img_height: Optional[int] = None,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
-    """
-    Compute homography matrices with support for line constraints.
-
-    This is the enhanced version of compute_homographies_from_annotations
-    that supports both keypoint and line annotations. Line annotations
-    provide additional constraints for regions where point intersections
-    are not visible (e.g., midfield).
+    """Compute anchor homographies from keypoints + optional line constraints.
 
     Args:
-        annotations: Dict mapping frame_idx to annotation dict:
-            {
-                "keypoints": List[PitchPoint],
-                "lines": List[LineAnnotation]  # Optional
-            }
-        num_samples_per_line: Points to sample per line constraint
-        max_iterations: Refinement iterations for line constraints
-        keypoint_weight: Weight multiplier for keypoints vs line points
+        annotations:          Dict mapping frame_idx → ``{"keypoints": [...], "lines": [...]}``
+        num_samples_per_line: Synthetic points sampled per line annotation.
+        max_iterations:       Line-constraint refinement iterations.
+        keypoint_weight:      Weight multiplier applied to keypoints vs synthetic points.
+        img_width:            Source video frame width (px) — used for coverage scoring.
+        img_height:           Source video frame height (px) — used for coverage scoring.
 
     Returns:
         Tuple of:
-        - homographies: Dict mapping frame_idx to 3x3 homography matrix
-        - info: Dict mapping frame_idx to computation info dict with:
-            - iterations: Number of iterations performed
-            - valid_lines: Number of valid line annotations used
-            - line_warnings: List of warning messages
-            - synthetic_points: Total synthetic points generated
-            - converged: Whether algorithm converged
+        - homographies: Dict[frame_idx → 3×3 H]
+        - computation_info: Dict[frame_idx → quality dict] containing:
+            - repr_mean / repr_max (px): reprojection errors over keypoints
+            - keypoints: per-point list with pitch_id, error_px, verdict
+            - coverage: fraction of frame grid cells occupied (0–1), or None
+            - quality: 'good' | 'warning' | 'bad'
+            - valid_lines, iterations, converged, synthetic_points, line_warnings
     """
     from pipeline.line_constraints import compute_line_constrained_homography
-    from pipeline.line_intersections import compute_line_intersections
-    from pipeline.schemas import PitchPoint, LineAnnotation
-
-    homographies = {}
-    computation_info = {}
-
-    for frame_idx, ann in annotations.items():
-        # Handle both old format (list of PitchPoint) and new format (dict)
-        if isinstance(ann, list):
-            # Old format: list of PitchPoint objects
-            keypoints = ann
-            lines = []
-        else:
-            # New format: dict with keypoints and lines
-            keypoints = ann.get("keypoints", [])
-            lines = ann.get("lines", [])
-
-        # Normalise lines to LineAnnotation objects for intersection derivation.
-        line_objects: List[LineAnnotation] = []
-        for line in lines:
-            if isinstance(line, LineAnnotation):
-                line_objects.append(line)
-            elif isinstance(line, dict):
-                line_objects.append(LineAnnotation(**line))
-
-        # Derive additional keypoints from line-pair intersections and merge
-        # with any manually clicked ones (manual takes precedence on same pitch_id).
-        if line_objects:
-            derived = compute_line_intersections(line_objects)
-            merged: dict = {p.pitch_id: p for p in derived}
-            merged.update({p.pitch_id: p for p in keypoints})
-            keypoints = list(merged.values())
-
-        if len(keypoints) < 4:
-            continue
-
-        # Extract keypoint correspondences
-        pts_image = np.array([
-            [p.x_img, p.y_img] for p in keypoints
-        ], dtype=np.float32)
-
-        pts_canvas = np.array([
-            _meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id))
-            for p in keypoints
-        ], dtype=np.float32)
-
-        # Convert line annotations to dict format for line_constraints module
-        line_dicts = [
-            {"line_id": l.line_id, "u1": l.u1, "v1": l.v1, "u2": l.u2, "v2": l.v2}
-            for l in line_objects
-        ]
-
-        try:
-            H, info = compute_line_constrained_homography(
-                pts_image, pts_canvas,
-                line_dicts,
-                num_samples_per_line=num_samples_per_line,
-                max_iterations=max_iterations,
-                keypoint_weight=keypoint_weight,
-                prefer_line_pts_for_init=True,
-                min_line_pts_for_init=4,
-            )
-            homographies[frame_idx] = H
-            # Augment info with keypoint count and reprojection error
-            info['num_keypoints'] = len(keypoints)
-            try:
-                pts_h = np.column_stack([pts_image, np.ones(len(pts_image))])
-                projected = (H @ pts_h.T).T
-                projected = projected[:, :2] / projected[:, 2:3]
-                errors = np.sqrt(((projected - pts_canvas) ** 2).sum(axis=1))
-                info['repr_mean'] = round(float(np.mean(errors)), 2)
-                info['repr_max'] = round(float(np.max(errors)), 2)
-            except Exception:
-                pass
-            info['quality'] = (
-                'good' if info.get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD else 'bad'
-            )
-            computation_info[frame_idx] = info
-        except ValueError as e:
-            computation_info[frame_idx] = {
-                'error': str(e),
-                'valid_lines': 0,
-                'iterations': 0
-            }
-            continue
-
-    # Post-processing: replace bad-anchor H matrices with an interpolated H
-    # from neighboring good anchors (mean reprojection error > _BAD_ANCHOR_THRESHOLD).
-    # This prevents a grossly wrong anchor H from poisoning ORB propagation.
-    sorted_frames = sorted(homographies.keys())
-    good_frames = [
-        f for f in sorted_frames
-        if computation_info.get(f, {}).get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD
-    ]
-    if good_frames:
-        for f in sorted_frames:
-            if computation_info.get(f, {}).get('repr_mean', float('inf')) > _BAD_ANCHOR_THRESHOLD:
-                left = [g for g in good_frames if g <= f]
-                right = [g for g in good_frames if g >= f]
-                if left and right:
-                    f_left, f_right = left[-1], right[0]
-                    if f_left == f_right:
-                        homographies[f] = homographies[f_left]
-                    else:
-                        alpha = (f - f_left) / (f_right - f_left)
-                        homographies[f] = (
-                            (1.0 - alpha) * homographies[f_left]
-                            + alpha * homographies[f_right]
-                        )
-                elif left:
-                    homographies[f] = homographies[left[-1]]
-                elif right:
-                    homographies[f] = homographies[right[0]]
-
-    return homographies, computation_info
-
-
-# =============================================================================
-# DLT-based homography with genuine line constraints
-# =============================================================================
-
-def compute_homographies_with_lines_v3(
-    annotations: Dict[int, Dict],
-    num_samples_per_line: int = 10,
-    ransac_iterations: int = 2000,
-    ransac_threshold: float = 10.0,
-    keypoint_weight: float = 3.0,
-) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
-    """Compute per-anchor homographies using genuine DLT line constraints.
-
-    Each line annotation provides one-dimensional DLT constraints (one row per
-    sample point) rather than synthetic full-point correspondences.  This
-    eliminates the circular dependency in ``compute_homographies_with_lines``
-    where synthetic points were constructed by projecting through the very H
-    being estimated.
-
-    The function follows the same contract as ``compute_homographies_with_lines``
-    so the two can be compared directly:
-    - Accepts the same annotation dict format.
-    - Derives additional keypoints from line intersections before solving.
-    - Applies the same bad-anchor interpolation post-processing.
-
-    Args:
-        annotations:          Dict mapping frame_idx → annotation dict
-                              ``{"keypoints": [...], "lines": [...]}``.
-        num_samples_per_line: Points sampled per line annotation.
-        ransac_iterations:    RANSAC trials in the DLT solver.
-        ransac_threshold:     Inlier threshold in canvas pixels.
-        keypoint_weight:      DLT row weight multiplier for full keypoints.
-
-    Returns:
-        ``(homographies, computation_info)`` — same structure as
-        ``compute_homographies_with_lines``.
-    """
-    from pipeline.line_constraints import compute_homography_dlt_with_lines
-    from pipeline.line_intersections import compute_line_intersections
-    from pipeline.schemas import PitchPoint, LineAnnotation
 
     homographies: Dict[int, np.ndarray] = {}
     computation_info: Dict[int, dict] = {}
 
     for frame_idx, ann in annotations.items():
         if isinstance(ann, list):
-            keypoints = ann
+            keypoints: List[PitchPoint] = ann
             lines = []
         else:
             keypoints = ann.get("keypoints", [])
             lines = ann.get("lines", [])
 
-        # Normalise lines to LineAnnotation objects.
-        line_objects: List[LineAnnotation] = []
-        for line in lines:
-            if isinstance(line, LineAnnotation):
-                line_objects.append(line)
-            elif isinstance(line, dict):
-                line_objects.append(LineAnnotation(**line))
-
-        # Derive intersection keypoints and merge with manual ones.
-        if line_objects:
-            derived = compute_line_intersections(line_objects)
-            merged: dict = {p.pitch_id: p for p in derived}
-            merged.update({p.pitch_id: p for p in keypoints})
-            keypoints = list(merged.values())
-
-        # Resolve canvas coordinates, dropping any unrecognised pitch_id.
-        valid_keypoints = []
-        for p in keypoints:
-            try:
-                resolve_pitch_coordinates(p.pitch_id)
-                valid_keypoints.append(p)
-            except ValueError:
-                pass
-        keypoints = valid_keypoints
-
-        line_dicts = [
-            {"line_id": l.line_id, "u1": l.u1, "v1": l.v1, "u2": l.u2, "v2": l.v2}
-            for l in line_objects
-        ]
-
-        n_eq = 2 * len(keypoints) + len(line_dicts) * num_samples_per_line
-        if n_eq < 4:
+        if len(keypoints) < 4:
             computation_info[frame_idx] = {
-                'error': f'Too few constraints ({n_eq} equations)',
-                'num_keypoints': len(keypoints),
-                'num_lines': len(line_dicts),
-                'converged': False,
+                "error": f"Too few keypoints ({len(keypoints)} < 4)",
+                "quality": "bad",
             }
             continue
 
-        pts_image = np.array([[p.x_img, p.y_img] for p in keypoints], dtype=np.float32) \
-            if keypoints else np.empty((0, 2), dtype=np.float32)
-        pts_canvas = np.array([
-            _meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id))
-            for p in keypoints
-        ], dtype=np.float32) if keypoints else np.empty((0, 2), dtype=np.float32)
-
-        try:
-            H, info = compute_homography_dlt_with_lines(
-                pts_image, pts_canvas,
-                line_dicts,
-                num_samples_per_line=num_samples_per_line,
-                ransac_iterations=ransac_iterations,
-                ransac_threshold=ransac_threshold,
-                keypoint_weight=keypoint_weight,
-            )
-        except ValueError as exc:
-            computation_info[frame_idx] = {
-                'error': str(exc),
-                'num_keypoints': len(keypoints),
-                'num_lines': len(line_dicts),
-                'converged': False,
-            }
-            continue
-
-        # Reprojection stats over all keypoints.
-        if info['repr_errors_keypoints']:
-            errs = info['repr_errors_keypoints']
-            info['repr_mean'] = round(float(np.mean(errs)), 2)
-            info['repr_max']  = round(float(np.max(errs)), 2)
-        elif info['repr_errors_lines']:
-            all_line_errs = list(info['repr_errors_lines'].values())
-            info['repr_mean'] = round(float(np.mean(all_line_errs)), 2)
-            info['repr_max']  = round(float(np.max(all_line_errs)), 2)
-
-        info['quality'] = (
-            'good' if info.get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD else 'bad'
+        pts_image = np.array([[p.x_img, p.y_img] for p in keypoints], dtype=np.float32)
+        pts_canvas = np.array(
+            [_meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id)) for p in keypoints],
+            dtype=np.float32,
         )
 
-        homographies[frame_idx] = H
-        computation_info[frame_idx] = info
+        line_dicts = []
+        for line in lines:
+            if isinstance(line, LineAnnotation):
+                line_dicts.append({
+                    "line_id": line.line_id,
+                    "u1": line.u1, "v1": line.v1,
+                    "u2": line.u2, "v2": line.v2,
+                })
+            elif isinstance(line, dict):
+                line_dicts.append(line)
 
-    # ── Bad-anchor interpolation (same logic as compute_homographies_with_lines) ──
-    sorted_frames = sorted(homographies.keys())
-    good_frames = [
-        f for f in sorted_frames
-        if computation_info.get(f, {}).get('repr_mean', float('inf')) <= _BAD_ANCHOR_THRESHOLD
-    ]
-    if good_frames:
-        for f in sorted_frames:
-            if computation_info.get(f, {}).get('repr_mean', float('inf')) > _BAD_ANCHOR_THRESHOLD:
-                left  = [g for g in good_frames if g <= f]
-                right = [g for g in good_frames if g >= f]
-                if left and right:
-                    f_l, f_r = left[-1], right[0]
-                    if f_l == f_r:
-                        homographies[f] = homographies[f_l]
-                    else:
-                        alpha = (f - f_l) / (f_r - f_l)
-                        homographies[f] = (1.0 - alpha) * homographies[f_l] + alpha * homographies[f_r]
-                elif left:
-                    homographies[f] = homographies[left[-1]]
-                elif right:
-                    homographies[f] = homographies[right[0]]
+        try:
+            H, info = compute_line_constrained_homography(
+                pts_image, pts_canvas, line_dicts,
+                num_samples_per_line=num_samples_per_line,
+                max_iterations=max_iterations,
+                keypoint_weight=keypoint_weight,
+            )
+        except ValueError as e:
+            computation_info[frame_idx] = {
+                "error": str(e), "valid_lines": 0, "iterations": 0, "quality": "bad",
+            }
+            continue
+
+        homographies[frame_idx] = H
+
+        # ── Per-keypoint reprojection errors ────────────────────────────────
+        info["num_keypoints"] = len(keypoints)
+        kp_errors: List[float] = []
+        kp_details = []
+        for kp, img_pt, can_pt in zip(keypoints, pts_image, pts_canvas):
+            proj = H @ np.array([img_pt[0], img_pt[1], 1.0], dtype=np.float64)
+            proj /= proj[2]
+            err = float(np.sqrt((proj[0] - can_pt[0]) ** 2 + (proj[1] - can_pt[1]) ** 2))
+            kp_errors.append(err)
+            kp_details.append({
+                "pitch_id": kp.pitch_id,
+                "error_px": round(err, 2),
+                "verdict": "outlier" if err > 30 else "high" if err > 15 else "good",
+            })
+
+        info["keypoints"] = kp_details
+        info["repr_mean"] = round(float(np.mean(kp_errors)), 2) if kp_errors else None
+        info["repr_max"] = round(float(np.max(kp_errors)), 2) if kp_errors else None
+
+        # ── Spatial coverage score ───────────────────────────────────────────
+        info["coverage"] = (
+            _compute_coverage_score(pts_image, img_width, img_height)
+            if img_width and img_height else None
+        )
+
+        # ── Overall quality rating ───────────────────────────────────────────
+        n_outliers = sum(1 for e in kp_errors if e > 30)
+        mean_err = info["repr_mean"] or 0.0
+        coverage = info["coverage"] if info["coverage"] is not None else 1.0
+        if n_outliers > 0 or mean_err > 30:
+            info["quality"] = "bad"
+        elif mean_err > 15 or coverage < 0.5:
+            info["quality"] = "warning"
+        else:
+            info["quality"] = "good"
+
+        computation_info[frame_idx] = info
 
     return homographies, computation_info
 
 
-# =============================================================================
-# v3: Near-first homography with line-intersection keypoints
-# =============================================================================
+def compute_homographies_with_lines_v3(
+    annotations: Dict[int, Dict],
+    num_samples_per_line: int = 10,
+    ransac_iterations: int = 2000,
+    ransac_threshold: float = 5.0,
+    keypoint_weight: float = 20.0,
+    img_width: Optional[int] = None,
+    img_height: Optional[int] = None,
+) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+    """Compute anchor homographies: keypoints define H, lines reinforce it.
 
-def _is_convex_quad(pts: np.ndarray) -> bool:
-    """Return True if four ordered 2-D points form a convex quadrilateral.
+    Algorithm:
+      1. H₀ = findHomography(keypoints, RANSAC) — the primary robust solution.
+      2. Build a weighted DLT system with Hartley-normalised coordinates:
+           • Each keypoint contributes 2 rows (full X+Y) at weight keypoint_weight.
+           • Each horizontal line sample contributes 1 row (Y-only) at weight 1.
+           • Each vertical sideline sample contributes 1 row (X-only) at weight 1.
+         With default keypoint_weight=20 and ~4 kp vs ~30 line pts the ratio is
+         ~5:1, so keypoints dominate and lines can only correct underdetermined
+         directions (e.g. X-skew far from the goal area).
+      3. Solve via weighted SVD; denormalise.
+      4. Sanity-check: if the result is degenerate or has worse reprojection than
+         H₀, fall back to H₀.
 
-    Convexity is confirmed when all consecutive edge cross-products share the
-    same sign (all clockwise or all counter-clockwise turns).
-
-    Args:
-        pts: (4, 2) array of points in traversal order (e.g. TL→TR→BR→BL).
-
-    Returns:
-        True if convex, False if concave or degenerate.
+    Hartley normalisation is mandatory here: without it, products of image coords
+    (~1000s) × canvas coords (~1000s) reach ~10⁶ in the DLT matrix, making SVD
+    numerically unstable and producing a catastrophically rotated output.
     """
-    signs = []
-    for i in range(4):
-        p0 = pts[i]
-        p1 = pts[(i + 1) % 4]
-        p2 = pts[(i + 2) % 4]
-        d1 = p1 - p0
-        d2 = p2 - p1
-        signs.append(d1[0] * d2[1] - d1[1] * d2[0])
-    return all(s > 0 for s in signs) or all(s < 0 for s in signs)
+    from pipeline.line_constraints import (
+        GAA_PITCH_LINES,
+        GAA_PITCH_SIDELINES,
+        sample_points_on_line,
+    )
 
+    homographies: Dict[int, np.ndarray] = {}
+    computation_info: Dict[int, dict] = {}
 
-def compute_homography_v3(
-    lines: List[LineAnnotation],
-    manual_keypoints: List[PitchPoint],
-    near_side_threshold_px: float = _NEAR_SIDE_Y_PX,
-    far_side_max_error_px: float = 40.0,
-) -> dict:
-    """Compute a single-frame homography using the near-first v3 strategy.
+    for frame_idx, ann in annotations.items():
+        keypoints = ann.get("keypoints", [])
+        lines = ann.get("lines", [])
 
-    Steps
-    -----
-    1. Derive keypoints from line-pair intersections via
-       ``compute_line_intersections``.
-    2. Merge with *manual_keypoints* (manual entries override derived ones for
-       the same ``pitch_id``).
-    3. Resolve canvas coordinates; drop any point with an unknown ``pitch_id``.
-    4. Split into *near-side* (canvas Y < *near_side_threshold_px*) and
-       *far-side* (everything else).
-    5. Compute an initial H from near-side points only (requires ≥ 4).
-    6. Validate each far-side point; accept only those whose reprojection error
-       under the near-side H is below *far_side_max_error_px*.
-    7. Recompute a final H from near + accepted-far points.
-    8. Convex-quadrilateral sanity check: project the four canvas corners
-       through H⁻¹ and verify the result is a convex quad in image space.
-
-    Args:
-        lines: Line annotations for this frame (``LineAnnotation`` objects).
-        manual_keypoints: Manually clicked keypoints, e.g. goal posts.
-        near_side_threshold_px: Canvas-Y boundary for near/far split (px).
-        far_side_max_error_px: Reprojection error ceiling for far-side points (px).
-
-    Returns:
-        dict with keys:
-
-        - ``H``              (np.ndarray | None) — 3×3 homography, or None on failure.
-        - ``error``          (str | None)        — Failure reason when H is None.
-        - ``points``         (list[dict])        — Per-point diagnostics:
-            ``pitch_id``, ``x_img``, ``y_img``, ``canvas_x``, ``canvas_y``,
-            ``source`` (``"manual"``|``"derived"``),
-            ``side``   (``"near"``|``"far"``),
-            ``accepted`` (bool), ``error_px`` (float|None).
-        - ``n_near``         (int)  — Near-side points used.
-        - ``n_far_accepted`` (int)  — Accepted far-side points.
-        - ``n_far_rejected`` (int)  — Rejected far-side points.
-        - ``n_derived``      (int)  — Keypoints derived from line intersections.
-        - ``n_manual``       (int)  — Manually provided keypoints.
-        - ``sanity_check``   (bool) — Canvas-corners convex-quad check result.
-    """
-    from pipeline.line_intersections import compute_line_intersections
-
-    # 1 + 2.  Derive intersection keypoints and merge with manual ones.
-    derived = compute_line_intersections(lines)
-    manual_by_id = {p.pitch_id: p for p in manual_keypoints}
-    all_by_id = {p.pitch_id: p for p in derived}
-    all_by_id.update(manual_by_id)  # manual takes precedence on duplicates
-
-    # 3.  Resolve canvas coordinates; skip unknown pitch_ids.
-    point_data: List[dict] = []
-    for p in all_by_id.values():
-        try:
-            x_m, y_m = resolve_pitch_coordinates(p.pitch_id)
-        except ValueError:
+        if len(keypoints) < 4:
+            computation_info[frame_idx] = {
+                "error": f"Too few keypoints ({len(keypoints)} < 4)",
+                "quality": "bad",
+            }
             continue
-        cx, cy = _meters_to_canvas_pixels(x_m, y_m)
-        point_data.append({
-            'pitch_id': p.pitch_id,
-            'x_img':    p.x_img,
-            'y_img':    p.y_img,
-            'canvas_x': cx,
-            'canvas_y': cy,
-            'source':   'manual' if p.pitch_id in manual_by_id else 'derived',
-        })
 
-    def _failure(error: str, n_near: int = 0, n_far: int = 0) -> dict:
-        pts = [
-            {**pd,
-             'side':     'near' if pd['canvas_y'] < near_side_threshold_px else 'far',
-             'accepted': False,
-             'error_px': None}
-            for pd in point_data
-        ]
-        return {
-            'H': None, 'error': error, 'points': pts,
-            'n_near': n_near, 'n_far_accepted': 0, 'n_far_rejected': n_far,
-            'n_derived': len(derived), 'n_manual': len(manual_by_id),
-            'sanity_check': False,
-        }
-
-    if len(point_data) < 4:
-        return _failure(f'Not enough valid points ({len(point_data)} < 4)')
-
-    # 4.  Split near / far.
-    near = [pd for pd in point_data if pd['canvas_y'] < near_side_threshold_px]
-    far  = [pd for pd in point_data if pd['canvas_y'] >= near_side_threshold_px]
-
-    if len(near) < 4:
-        return _failure(
-            f'Not enough near-side points ({len(near)} < 4)',
-            n_near=len(near), n_far=len(far),
+        pts_image = np.array([[p.x_img, p.y_img] for p in keypoints], dtype=np.float64)
+        pts_canvas = np.array(
+            [_meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id)) for p in keypoints],
+            dtype=np.float64,
         )
 
-    # 5.  Initial H from near-side only.
-    pts_img_near = np.array([[pd['x_img'], pd['y_img']] for pd in near], dtype=np.float32)
-    pts_can_near = np.array([[pd['canvas_x'], pd['canvas_y']] for pd in near], dtype=np.float32)
-    try:
-        H_near = compute_homography(pts_img_near, pts_can_near)
-    except ValueError as exc:
-        return _failure(f'Near-side homography failed: {exc}', n_near=len(near), n_far=len(far))
+        # Step 1 — Primary H from keypoints only (RANSAC)
+        H0, _ = cv2.findHomography(
+            pts_image.astype(np.float32),
+            pts_canvas.astype(np.float32),
+            cv2.RANSAC,
+            ransac_threshold,
+            maxIters=ransac_iterations,
+        )
+        if H0 is None:
+            computation_info[frame_idx] = {"error": "RANSAC failed on keypoints", "quality": "bad"}
+            continue
 
-    def _reproj_err(H: np.ndarray, x_img: float, y_img: float, cx: float, cy: float) -> float:
-        proj = H @ np.array([x_img, y_img, 1.0], dtype=np.float64)
-        proj /= proj[2]
-        return float(np.sqrt((proj[0] - cx) ** 2 + (proj[1] - cy) ** 2))
+        # Parse line annotations once
+        line_dicts: List[dict] = []
+        for line in lines:
+            if isinstance(line, LineAnnotation):
+                line_dicts.append({
+                    "line_id": line.line_id,
+                    "u1": line.u1, "v1": line.v1,
+                    "u2": line.u2, "v2": line.v2,
+                })
+            elif isinstance(line, dict):
+                line_dicts.append(line)
 
-    # 6.  Annotate near points; validate far points against H_near.
-    for pd in near:
-        pd['side']     = 'near'
-        pd['accepted'] = True
-        pd['error_px'] = round(_reproj_err(H_near, pd['x_img'], pd['y_img'], pd['canvas_x'], pd['canvas_y']), 2)
+        # If no line annotations just return the keypoint H
+        if not line_dicts:
+            homographies[frame_idx] = H0.astype(np.float64)
+            _fill_info(computation_info, frame_idx, H0, keypoints, pts_image, pts_canvas,
+                       valid_lines=0, n_line_pts=0, img_width=img_width, img_height=img_height)
+            continue
 
-    far_accepted: List[dict] = []
-    far_rejected: List[dict] = []
-    for pd in far:
-        pd['side'] = 'far'
-        err = _reproj_err(H_near, pd['x_img'], pd['y_img'], pd['canvas_x'], pd['canvas_y'])
-        pd['error_px'] = round(err, 2)
-        if err < far_side_max_error_px:
-            pd['accepted'] = True
-            far_accepted.append(pd)
-        else:
-            pd['accepted'] = False
-            far_rejected.append(pd)
+        # Step 2 — Hartley-normalised weighted DLT
+        # Normalise keypoint coords (used to compute T_img / T_canvas)
+        pts_image_n, T_img = _hartley_normalize(pts_image)
+        pts_canvas_n, T_canvas = _hartley_normalize(pts_canvas)
 
-    # 7.  Final H from near + accepted far.
-    accepted = near + far_accepted
-    pts_img_all = np.array([[pd['x_img'], pd['y_img']] for pd in accepted], dtype=np.float32)
-    pts_can_all = np.array([[pd['canvas_x'], pd['canvas_y']] for pd in accepted], dtype=np.float32)
-    try:
-        H_final = compute_homography(pts_img_all, pts_can_all)
-    except ValueError:
-        H_final = H_near  # fall back to near-only H
+        rows: List[List[float]] = []
+        weights: List[float] = []
 
-    # Refresh reprojection errors under the final H.
-    for pd in accepted:
-        pd['error_px'] = round(_reproj_err(H_final, pd['x_img'], pd['y_img'], pd['canvas_x'], pd['canvas_y']), 2)
+        # Keypoint rows — high weight, full 2D constraint
+        w_kp = float(keypoint_weight)
+        for (u, v), (x, y) in zip(pts_image_n, pts_canvas_n):
+            rows.append([u, v, 1, 0, 0, 0, -x * u, -x * v, -x])
+            rows.append([0, 0, 0, u, v, 1, -y * u, -y * v, -y])
+            weights.extend([w_kp, w_kp])
 
-    # 8.  Convex-quad sanity check via H⁻¹.
-    sanity_ok = False
-    try:
-        H_inv = np.linalg.inv(H_final)
-        canvas_corners = np.array([
-            [0.0,        0.0,        1.0],
-            [float(OUT_W), 0.0,        1.0],
-            [float(OUT_W), float(OUT_H), 1.0],
-            [0.0,        float(OUT_H), 1.0],
-        ])
-        img_corners = []
-        for c in canvas_corners:
-            proj = H_inv @ c
-            if abs(proj[2]) < 1e-10:
-                break
-            proj /= proj[2]
-            img_corners.append(proj[:2])
-        if len(img_corners) == 4:
-            sanity_ok = _is_convex_quad(np.array(img_corners))
-    except np.linalg.LinAlgError:
-        sanity_ok = False
+        # Line rows — low weight, 1D constraint per sample
+        # The fixed canvas coordinate must be normalised using T_canvas.
+        # T_canvas maps: x_n = scale_c*(x - cx_c), y_n = scale_c*(y - cy_c)
+        scale_c = T_canvas[0, 0]
+        cx_c, cy_c = -T_canvas[0, 2] / scale_c, -T_canvas[1, 2] / scale_c
 
-    return {
-        'H':              H_final,
-        'error':          None,
-        'points':         accepted + far_rejected,
-        'n_near':         len(near),
-        'n_far_accepted': len(far_accepted),
-        'n_far_rejected': len(far_rejected),
-        'n_derived':      len(derived),
-        'n_manual':       len(manual_by_id),
-        'sanity_check':   sanity_ok,
-    }
+        n_line_pts = 0
+        valid_lines = 0
+        for line_dict in line_dicts:
+            line_id = line_dict["line_id"]
+            img_pts_raw = sample_points_on_line(
+                line_dict["u1"], line_dict["v1"],
+                line_dict["u2"], line_dict["v2"],
+                num_samples_per_line,
+            ).astype(np.float64)
 
+            # Normalise image sample points
+            img_pts_h = np.column_stack([img_pts_raw, np.ones(len(img_pts_raw))])
+            img_pts_n = (T_img @ img_pts_h.T).T[:, :2]
+
+            if line_id in GAA_PITCH_LINES:
+                _, y_c_raw = _meters_to_canvas_pixels(0.0, GAA_PITCH_LINES[line_id])
+                y_c = scale_c * (y_c_raw - cy_c)   # normalised canvas Y
+                for u, v in img_pts_n:
+                    rows.append([0, 0, 0, u, v, 1, -y_c * u, -y_c * v, -y_c])
+                    weights.append(1.0)
+                    n_line_pts += 1
+                valid_lines += 1
+
+            elif line_id in GAA_PITCH_SIDELINES:
+                x_c_raw, _ = _meters_to_canvas_pixels(GAA_PITCH_SIDELINES[line_id], 0.0)
+                x_c = scale_c * (x_c_raw - cx_c)   # normalised canvas X
+                for u, v in img_pts_n:
+                    rows.append([u, v, 1, 0, 0, 0, -x_c * u, -x_c * v, -x_c])
+                    weights.append(1.0)
+                    n_line_pts += 1
+                valid_lines += 1
+
+        # Step 3 — Weighted SVD solve
+        A = np.array(rows, dtype=np.float64)
+        w_vec = np.array(weights, dtype=np.float64)
+        _, _, Vt = np.linalg.svd(A * w_vec[:, np.newaxis], full_matrices=False)
+        H_norm = Vt[-1].reshape(3, 3)
+
+        # Denormalise: H = T_canvas⁻¹ @ H_norm @ T_img
+        H = np.linalg.inv(T_canvas) @ H_norm @ T_img
+        if abs(H[2, 2]) > 1e-10:
+            H /= H[2, 2]
+
+        # Step 4 — Sanity check: fall back to H₀ if degenerate or worse
+        def _repr_mean(mat):
+            errs = []
+            for ip, cp in zip(pts_image, pts_canvas):
+                p = mat @ np.array([ip[0], ip[1], 1.0])
+                p /= p[2]
+                errs.append(float(np.sqrt((p[0] - cp[0])**2 + (p[1] - cp[1])**2)))
+            return float(np.mean(errs))
+
+        if np.any(np.isnan(H)) or np.linalg.cond(H) > 1e8 or _repr_mean(H) > _repr_mean(H0) * 2:
+            H = H0.astype(np.float64)
+
+        homographies[frame_idx] = H
+        _fill_info(computation_info, frame_idx, H, keypoints, pts_image, pts_canvas,
+                   valid_lines=valid_lines, n_line_pts=n_line_pts,
+                   img_width=img_width, img_height=img_height)
+
+    return homographies, computation_info
+
+
+# ---------------------------------------------------------------------------
+# Legacy alias
+# ---------------------------------------------------------------------------
+
+map_pixel_to_distorted_pitch = map_pixel_to_pitch

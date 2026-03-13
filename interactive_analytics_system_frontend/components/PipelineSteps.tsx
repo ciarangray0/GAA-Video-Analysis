@@ -533,12 +533,12 @@ export default function PipelineSteps({
                     </div>
                     <div>
                       <p className="thumb-sublabel">Warped</p>
-                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
+                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?method=v3&v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
                     </div>
                     {stepCResult && (
                       <div>
                         <p className="thumb-sublabel">With Players</p>
-                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players?v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
+                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players?method=v3&v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
                       </div>
                     )}
                   </div>
