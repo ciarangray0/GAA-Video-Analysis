@@ -54,15 +54,26 @@ export async function mapPlayers(videoId: string): Promise<PlayerPosition[]> {
   return res.json()
 }
 
+export interface InterpolationParams {
+  sgLongWindow?: number   // SG window for tracks >20 frames (default 15)
+  sgMidWindow?: number    // SG window for tracks 10-20 frames (default 11)
+  maxVelPx?: number       // Max px/frame displacement (default 4, 0 = off)
+}
+
 export async function interpolateTrajectories(
   videoId: string,
   startFrame: number,
   endFrame: number,
+  params: InterpolationParams = {},
 ): Promise<{ frames_generated: number; method: string }> {
-  const res = await fetch(
-    `${API_URL}/videos/${videoId}/interpolate?start_frame=${startFrame}&end_frame=${endFrame}`,
-    { method: 'POST' },
-  )
+  const qs = new URLSearchParams({
+    start_frame: String(startFrame),
+    end_frame: String(endFrame),
+    ...(params.sgLongWindow !== undefined && { sg_long_window: String(params.sgLongWindow) }),
+    ...(params.sgMidWindow  !== undefined && { sg_mid_window:  String(params.sgMidWindow) }),
+    ...(params.maxVelPx     !== undefined && { max_vel_px:     String(params.maxVelPx) }),
+  })
+  const res = await fetch(`${API_URL}/videos/${videoId}/interpolate?${qs}`, { method: 'POST' })
   if (!res.ok) {
     const err = await res.json()
     throw new Error(err.detail || 'Interpolation failed')

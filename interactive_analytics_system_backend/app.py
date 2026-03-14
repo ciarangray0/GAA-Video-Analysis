@@ -27,7 +27,10 @@ from pipeline.schemas import (
 )
 # NOTE: `run_tracking` performs heavy ML imports; imported lazily inside endpoint.
 from pipeline.homography import compute_homographies_with_lines, resolve_pitch_coordinates
-from pipeline.constrained_homography import build_constrained_per_frame_H
+from pipeline.constrained_homography import (
+    build_constrained_per_frame_H,
+    build_optical_flow_per_frame_H,
+)
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
@@ -521,7 +524,8 @@ async def compute_homographies_v3(
     current H estimate.
 
     Results are stored separately from v2 and do not overwrite them.
-    Per-frame Hs are propagated via ORB feature matching, same as v2.
+    Per-frame Hs are propagated via Lucas-Kanade optical flow with forward-backward
+    consistency, bidirectional drift correction, and Savitzky-Golay smoothing.
     """
     from pipeline.homography import compute_homographies_with_lines_v3
 
@@ -558,14 +562,18 @@ async def compute_homographies_v3(
     save_annotations(video_id, annotations_dict)
 
     try:
-        per_frame_hs, _ = await asyncio.to_thread(
+        per_frame_hs, of_info = await asyncio.to_thread(
             partial(
-                build_constrained_per_frame_H,
+                build_optical_flow_per_frame_H,
                 video_info["path"],
                 anchor_homographies,
-                start_frame=0,
-                end_frame=video_info["num_frames"] - 1,
+                total_frames=video_info["num_frames"],
             )
+        )
+        logger.info(
+            f"v3 optical flow: {of_info.get('num_frames')} frames, "
+            f"{len(of_info.get('failed_frames', []))} failed OF pairs, "
+            f"drift norms: {of_info.get('drift_at_anchors')}"
         )
     except Exception as e:
         logger.error(f"v3 per-frame H propagation failed for video {video_id}: {e}")
@@ -615,11 +623,17 @@ async def map_players(video_id: str):
     if detections is None:
         raise HTTPException(status_code=400, detail="No detections found. Run tracking first.")
 
-    homographies = load_homographies(video_id)
+    homographies = (
+        store.v3_homographies_cache.get(video_id) or load_v3_homographies(video_id) or
+        store.homographies_cache.get(video_id) or load_homographies(video_id)
+    )
     if homographies is None:
         raise HTTPException(status_code=400, detail="No homographies found. Compute homographies first.")
 
-    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    anchor_hs = (
+        store.v3_anchor_homographies_cache.get(video_id) or load_v3_anchor_homographies(video_id) or
+        store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
+    )
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
     try:
@@ -786,8 +800,17 @@ async def interpolate_trajectories_endpoint(
     video_id: str,
     start_frame: int = Query(0, description="First frame to interpolate"),
     end_frame: int = Query(100, description="Last frame to interpolate (inclusive)"),
+    sg_long_window: int = Query(15, ge=3, le=51, description="SG window for tracks >20 frames"),
+    sg_mid_window: int = Query(11, ge=3, le=31, description="SG window for tracks 10-20 frames"),
+    max_vel_px: float = Query(4.0, ge=0.0, le=50.0, description="Max displacement per frame in pitch-canvas pixels (0 = disabled)"),
 ):
-    """Interpolate player trajectories between anchor frames."""
+    """Interpolate player trajectories between anchor frames.
+
+    Smoothing pipeline per track:
+    1. Linear interpolation fills gaps between detections.
+    2. Savitzky-Golay smoothing (window size depends on track length).
+    3. Max-velocity clamping removes residual spikes.
+    """
     _get_video_or_404(video_id)
 
     if start_frame < 0 or end_frame < start_frame:
@@ -802,7 +825,12 @@ async def interpolate_trajectories_endpoint(
         raise HTTPException(status_code=400, detail="No homography-based positions found for interpolation")
 
     try:
-        interpolated = interpolate_trajectories(homography_positions, start_frame, end_frame)
+        interpolated = interpolate_trajectories(
+            homography_positions, start_frame, end_frame,
+            sg_long_window=sg_long_window,
+            sg_mid_window=sg_mid_window,
+            max_vel_px=max_vel_px,
+        )
 
         existing_filtered = [
             p for p in sparse_positions

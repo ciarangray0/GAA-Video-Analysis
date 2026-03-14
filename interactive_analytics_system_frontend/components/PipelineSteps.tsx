@@ -144,6 +144,10 @@ export default function PipelineSteps({
   const [anchorQualityError, setAnchorQualityError] = useState<string | null>(null)
   // Incremented each time step B completes, used to bust the browser image cache
   const [stepBVersion, setStepBVersion] = useState(0)
+  // Step D smoothing params
+  const [sgLongWindow, setSgLongWindow] = useState(15)
+  const [sgMidWindow, setSgMidWindow] = useState(11)
+  const [maxVelPx, setMaxVelPx] = useState(4.0)
 
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
     const method = options?.method || 'GET'
@@ -270,7 +274,9 @@ export default function PipelineSteps({
     onRunningStepChange('D', 'add')
     onError('')
     try {
-      const data = await interpolateTrajectories(videoMetadata.video_id, startFrame, endFrame)
+      const data = await interpolateTrajectories(videoMetadata.video_id, startFrame, endFrame, {
+        sgLongWindow, sgMidWindow, maxVelPx,
+      })
       onStepsClearedStale(['D'])
       const allPositions = await getPlayerPositions(videoMetadata.video_id)
       onStepDComplete(data, allPositions, startFrame, endFrame, videoMetadata.fps)
@@ -280,7 +286,7 @@ export default function PipelineSteps({
     } finally {
       onRunningStepChange('D', 'remove')
     }
-  }, [videoMetadata, stepCResult, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
+  }, [videoMetadata, stepCResult, sgLongWindow, sgMidWindow, maxVelPx, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
 
   const loadPerFrameDiagnostic = useCallback(async () => {
     if (!videoMetadata) return
@@ -589,6 +595,32 @@ export default function PipelineSteps({
         <div className="step-header">
           <h4>Step D: Interpolate Trajectories</h4>
           {staleSteps.has('D') && <span className="stale-badge">STALE</span>}
+        </div>
+        <div className="config-row" style={{ gap: 16, marginBottom: 10 }}>
+          <label style={{ fontSize: 13 }}>
+            SG window (long tracks &gt;20f):&nbsp;
+            <input
+              type="number" min={3} max={51} step={2} value={sgLongWindow}
+              onChange={e => setSgLongWindow(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
+          <label style={{ fontSize: 13 }}>
+            SG window (mid tracks 10–20f):&nbsp;
+            <input
+              type="number" min={3} max={31} step={2} value={sgMidWindow}
+              onChange={e => setSgMidWindow(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
+          <label style={{ fontSize: 13 }}>
+            Max vel (px/frame):&nbsp;
+            <input
+              type="number" min={0} max={50} step={0.5} value={maxVelPx}
+              onChange={e => setMaxVelPx(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
         </div>
         <button onClick={runStepD} disabled={runningSteps.has('D') || !stepCResult} className="process-btn">
           {runningSteps.has('D') ? 'Interpolating...' : 'Interpolate'}

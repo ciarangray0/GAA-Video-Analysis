@@ -200,6 +200,7 @@ export function drawPitch(
   }
 
   const framePositions = positions.filter(p => p.frame_idx === frame)
+  const activeTrackIds = new Set(framePositions.map(p => p.track_id))
 
   const outOfBounds = framePositions.filter(
     p => p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H,
@@ -210,7 +211,43 @@ export function drawPitch(
 
   const getPlayerColor = (trackId: number): string => `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
 
+  // For each track that has been seen at some point up to this frame but is
+  // not active now, find its most recent position and draw a grey ghost dot.
+  const pastPositions = positions.filter(p => p.frame_idx < frame)
+  const lastKnownByTrack = new Map<number, PlayerPosition>()
+  for (const p of pastPositions) {
+    const existing = lastKnownByTrack.get(p.track_id)
+    if (!existing || p.frame_idx > existing.frame_idx) {
+      lastKnownByTrack.set(p.track_id, p)
+    }
+  }
+
   const padding = 8
+
+  // Draw ghost dots first (underneath active dots)
+  lastKnownByTrack.forEach((pos, trackId) => {
+    if (activeTrackIds.has(trackId)) return  // active — drawn below
+    const x = (pos.x_pitch / PITCH_CANVAS_W) * W
+    const y = (pos.y_pitch / PITCH_CANVAS_H) * H
+    const clampedX = Math.max(padding, Math.min(W - padding, x))
+    const clampedY = Math.max(padding, Math.min(H - padding, y))
+
+    ctx.fillStyle = 'rgba(160, 160, 160, 0.45)'
+    ctx.beginPath()
+    ctx.arc(clampedX, clampedY, 7, 0, 2 * Math.PI)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+
+    ctx.fillStyle = 'rgba(200, 200, 200, 0.6)'
+    ctx.font = 'bold 9px Arial'
+    ctx.textAlign = 'center'
+    ctx.fillText(trackId.toString(), clampedX, clampedY + 3)
+  })
+
+  // Draw active players on top
   framePositions.forEach((pos) => {
     const x = (pos.x_pitch / PITCH_CANVAS_W) * W
     const y = (pos.y_pitch / PITCH_CANVAS_H) * H

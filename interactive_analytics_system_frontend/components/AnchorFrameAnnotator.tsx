@@ -55,14 +55,14 @@ function drawCrosshair(
   ctx.stroke()
 
   if (label) {
-    const pad = 3
-    ctx.font = '9px monospace'
+    const pad = 2
+    ctx.font = '7px monospace'
     const tw = ctx.measureText(label).width
-    const lx = cx + r + arm + 4
-    const ly = cy + 3
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'
-    ctx.fillRect(lx - pad, ly - 10, tw + pad * 2, 13)
-    ctx.fillStyle = '#ffffff'
+    const lx = cx + r + arm + 3
+    const ly = cy + 2
+    ctx.fillStyle = 'rgba(0,0,0,0.30)'
+    ctx.fillRect(lx - pad, ly - 8, tw + pad * 2, 10)
+    ctx.fillStyle = 'rgba(255,255,255,0.70)'
     ctx.textAlign = 'left'
     ctx.fillText(label, lx, ly)
   }
@@ -153,16 +153,17 @@ export default function AnchorFrameAnnotator({
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
     const anchor = anchorFrames[currentAnchorIdx]
-    // imgScale: converts image pixels → canvas pixels
-    const imgScale = canvas.width / img.naturalWidth
+    // Separate X and Y scales to correctly handle frames whose height rounds differently from width
+    const imgScaleX = canvas.width / img.naturalWidth
+    const imgScaleY = canvas.height / img.naturalHeight
 
     // Draw line annotations
     if (anchor?.lines) {
       for (const line of anchor.lines) {
-        const x1 = line.u1 * imgScale
-        const y1 = line.v1 * imgScale
-        const x2 = line.u2 * imgScale
-        const y2 = line.v2 * imgScale
+        const x1 = line.u1 * imgScaleX
+        const y1 = line.v1 * imgScaleY
+        const x2 = line.u2 * imgScaleX
+        const y2 = line.v2 * imgScaleY
 
         const isVertical = AVAILABLE_LINES[line.line_id]?.orientation === 'vertical'
         const lineColor = isVertical ? 'rgba(255, 165, 0, 0.7)' : 'rgba(0, 220, 255, 0.7)'
@@ -187,16 +188,16 @@ export default function AnchorFrameAnnotator({
 
     // Pending line first-point indicator
     if (pendingLinePoint1) {
-      const px = pendingLinePoint1.x * imgScale
-      const py = pendingLinePoint1.y * imgScale
+      const px = pendingLinePoint1.x * imgScaleX
+      const py = pendingLinePoint1.y * imgScaleY
       drawCrosshair(ctx, px, py, '#ffff00', '←2nd point')
     }
 
     // Annotated keypoints
     if (anchor?.points) {
       for (const point of anchor.points) {
-        const px = point.x_img * imgScale
-        const py = point.y_img * imgScale
+        const px = point.x_img * imgScaleX
+        const py = point.y_img * imgScaleY
         drawCrosshair(ctx, px, py, '#00ff80', point.pitch_id)
       }
     }
