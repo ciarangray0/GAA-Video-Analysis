@@ -190,7 +190,6 @@ export default function ResultsViewer({
           <button onClick={() => setShowBotSortOverlay(!showBotSortOverlay)} className={`sidebar-toggle ${showBotSortOverlay ? 'active' : ''}`}>
             🎯 BotSort Overlay
           </button>
-          {showBotSortOverlay && <span className="botsort-placeholder">BotSort overlay: coming soon</span>}
         </div>
       </div>
 
@@ -242,8 +241,26 @@ export default function ResultsViewer({
               <span>● Each player has a unique color based on their track ID</span>
             </div>
           </div>
+
         </div>
       </div>
+
+      {showBotSortOverlay && (
+        <div className="botsort-overlay-section">
+          <h4>BotSort Detections — Frame {currentFrame}</h4>
+          <img
+            key={currentFrame}
+            src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/detections_overlay`}
+            alt={`BotSort detections frame ${currentFrame}`}
+            className="botsort-overlay-img"
+            onError={(e) => {
+              const img = e.target as HTMLImageElement
+              img.style.display = 'none'
+              img.insertAdjacentHTML('afterend', '<p style="color:#888;padding:8px">No detections available for this frame</p>')
+            }}
+          />
+        </div>
+      )}
 
       {/* Player list for current frame */}
       <div className="current-frame-players">

@@ -123,7 +123,6 @@ export default function PipelineSteps({
   const [sgMidWindow, setSgMidWindow] = useState(11)
   const [maxVelPx, setMaxVelPx] = useState(4.0)
   // Step B distortion mode: 0=none, 1=after H, 2=integrated
-  const [distortionMode, setDistortionMode] = useState(0)
 
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
     const method = options?.method || 'GET'
@@ -180,7 +179,7 @@ export default function PipelineSteps({
     setAnchorQuality(null)
     setAnchorQualityError(null)
     try {
-      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v3?distortion_mode=${distortionMode}`
+      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v3`
 
       const res = await apiFetch(endpoint, {
         method: 'POST',
@@ -220,7 +219,7 @@ export default function PipelineSteps({
     } finally {
       onRunningStepChange('B', 'remove')
     }
-  }, [videoMetadata, anchorFrames, distortionMode, apiFetch, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, anchorFrames, apiFetch, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepC = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
@@ -299,22 +298,6 @@ export default function PipelineSteps({
         <div className="step-header">
           <h4>Step B: Compute Homographies</h4>
           {staleSteps.has('B') && <span className="stale-badge">STALE</span>}
-        </div>
-        <div className="config-row" style={{ gap: 16, marginBottom: 8 }}>
-          <span style={{ fontSize: 13 }}>Distortion mode:</span>
-          {([['None', 0], ['After H', 1], ['Integrated', 2]] as const).map(([label, val]) => (
-            <label key={val} style={{ fontSize: 13, cursor: 'pointer' }}>
-              <input
-                type="radio"
-                name="distortionMode"
-                value={val}
-                checked={distortionMode === val}
-                onChange={() => setDistortionMode(val)}
-                style={{ marginRight: 4 }}
-              />
-              {label}
-            </label>
-          ))}
         </div>
         <button onClick={runStepB} disabled={runningSteps.has('B') || validAnnotationCount === 0} className="process-btn">
           {runningSteps.has('B') ? 'Computing...' : 'Compute Homographies'}

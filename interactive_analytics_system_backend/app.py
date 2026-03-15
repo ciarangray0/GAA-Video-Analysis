@@ -15,8 +15,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-from pipeline.config import OUT_W, OUT_H, K1
-from pipeline.rendering import distorted_homography_warp
+from pipeline.config import OUT_W, OUT_H
+from pipeline.rendering import warp_frame
 from pipeline.schemas import (
     VideoCreateResponse,
     TrackResponse,
@@ -231,7 +231,7 @@ def _draw_reference_lines(warped: np.ndarray) -> None:
         cv2.putText(warped, label, (4, y_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
 
 
-def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray, distortion_mode: int = 0) -> Response:
+def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Response:
     """Extract a video frame, apply homography warp, return JPEG Response."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -239,7 +239,7 @@ def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray, distort
     cap.release()
     if not ret:
         raise HTTPException(status_code=500, detail="Failed to extract frame")
-    warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1, distortion_mode=distortion_mode)
+    warped = warp_frame(frame, H, OUT_W, OUT_H)
     _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
@@ -351,8 +351,7 @@ async def get_warped_frame_any(
         if not ret:
             raise HTTPException(status_code=500, detail="Failed to extract frame")
 
-        d_mode = store.distortion_mode_cache.get(video_id, 0)
-        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1, distortion_mode=d_mode)
+        warped = warp_frame(frame, H, OUT_W, OUT_H)
         _draw_reference_lines(warped)
 
         if players:
@@ -382,6 +381,46 @@ async def get_video_detections(video_id: str):
     if detections is None:
         raise HTTPException(status_code=404, detail="No detections found. Run tracking first.")
     return detections
+
+
+@app.get("/videos/{video_id}/frames/{frame_idx}/detections_overlay")
+async def get_detections_overlay(video_id: str, frame_idx: int):
+    """Return a JPEG of the raw video frame with BotSort bounding boxes overlaid."""
+    video_info = _get_video_or_404(video_id)
+
+    detections = store.detections_cache.get(video_id) or load_detections(video_id)
+    if detections is None:
+        raise HTTPException(status_code=404, detail="No detections found. Run tracking first.")
+
+    try:
+        fps = video_info["fps"] or 25
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_MSEC, frame_idx / fps * 1000)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        frame_dets = [d for d in detections if d.frame_idx == frame_idx]
+        for det in frame_dets:
+            x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
+            # Unique colour per track ID (same HSV hue trick as the pitch canvas)
+            hue = int((det.track_id * 137.508) % 180)
+            colour_hsv = np.array([[[hue, 220, 220]]], dtype=np.uint8)
+            colour_bgr = cv2.cvtColor(colour_hsv, cv2.COLOR_HSV2BGR)[0][0].tolist()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), colour_bgr, 2)
+            label = f"#{det.track_id}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), colour_bgr, -1)
+            cv2.putText(frame, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed detections_overlay {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create overlay: {str(e)}")
 
 
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
@@ -499,7 +538,6 @@ async def compute_homographies_v3(
     ransac_iterations: int = Query(2000, ge=100, le=10000, description="RANSAC trials for keypoint-only H₀"),
     ransac_threshold: float = Query(5.0, ge=1.0, le=50.0, description="RANSAC inlier threshold in canvas pixels"),
     keypoint_weight: float = Query(20.0, ge=1.0, le=100.0, description="Weight multiplier for keypoints vs line samples (higher = lines reinforce more gently)"),
-    distortion_mode: int = Query(0, ge=0, le=2, description="Radial distortion mode: 0=none, 1=after H, 2=integrated into H fitting"),
 ):
     """
     Compute homography matrices using genuine DLT line constraints (v3).
@@ -531,7 +569,6 @@ async def compute_homographies_v3(
                 ransac_iterations=ransac_iterations,
                 ransac_threshold=ransac_threshold,
                 keypoint_weight=keypoint_weight,
-                distortion_mode=distortion_mode,
             )
         )
     except Exception as e:
@@ -545,7 +582,6 @@ async def compute_homographies_v3(
         )
 
     store.v3_anchor_homographies_cache[video_id] = anchor_homographies
-    store.distortion_mode_cache[video_id] = distortion_mode
     save_v3_anchor_homographies(video_id, anchor_homographies)
     save_annotations(video_id, annotations_dict)
 
@@ -572,13 +608,12 @@ async def compute_homographies_v3(
 
     logger.info(
         f"v3 DLT: computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
-        f"for video {video_id} (distortion_mode={distortion_mode})"
+        f"for video {video_id}"
     )
 
     return {
         "frames": sorted(anchor_homographies.keys()),
         "per_frame_count": len(per_frame_hs),
-        "distortion_mode": distortion_mode,
         "info": {str(k): v for k, v in computation_info.items()},
     }
 
@@ -625,12 +660,10 @@ async def map_players(video_id: str):
     )
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
-    distortion_mode = store.distortion_mode_cache.get(video_id, 0)
     try:
         positions = map_players_to_pitch(
             detections, homographies,
             anchor_frame_indices=anchor_frame_indices,
-            distortion_mode=distortion_mode,
         )
         store.player_positions_cache[video_id] = positions
     except Exception as e:
