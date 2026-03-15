@@ -15,6 +15,7 @@ class VideoStore:
         self.v3_homographies_cache: Dict[str, Dict[int, Any]] = {}
         self.v3_anchor_homographies_cache: Dict[str, Dict[int, Any]] = {}
         self.player_positions_cache: Dict[str, List[PlayerPitchPosition]] = {}
+        self.distortion_mode_cache: Dict[str, int] = {}  # video_id → 0/1/2
 
 
 store = VideoStore()

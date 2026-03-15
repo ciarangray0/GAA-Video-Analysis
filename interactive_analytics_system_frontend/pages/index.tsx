@@ -217,7 +217,6 @@ export default function Home() {
             processedEndFrame={processedEndFrame}
             homographyFrameIndices={homographyFrameIndices}
             processedFps={processedFps}
-            anchorFrames={anchorFrames}
           />
         )}
 

@@ -3,13 +3,21 @@ import cv2
 import numpy as np
 
 
-def distorted_homography_warp(img, H, out_w, out_h, k1):
+def distorted_homography_warp(img, H, out_w, out_h, k1, distortion_mode=1):
     """
-    Warp an image using homography with radial distortion.
+    Warp an image using homography with optional radial distortion.
 
-    This matches the notebook's distorted_homography_warp function exactly.
-    Uses vectorized operations for performance.
+    distortion_mode:
+      0 — none:       plain cv2.warpPerspective, k1 ignored.
+      1 — after:      for each canvas pixel (x,y), compute distorted position
+                      (x_d, y_d), then back-project through H_inv.  Matches the
+                      original notebook approach.
+      2 — integrated: same remap logic as mode 1 (H was calibrated differently,
+                      but the rendering formula is identical).
     """
+    if distortion_mode == 0:
+        return cv2.warpPerspective(img, H, (out_w, out_h))
+
     h, w = img.shape[:2]
     H_inv = np.linalg.inv(H)
 
@@ -18,7 +26,7 @@ def distorted_homography_warp(img, H, out_w, out_h, k1):
     # Create coordinate grids
     xs, ys = np.meshgrid(np.arange(out_w), np.arange(out_h))
 
-    # Apply radial distortion
+    # Apply radial distortion in canvas space
     dx = xs - cx
     dy = ys - cy
     r2 = dx**2 + dy**2

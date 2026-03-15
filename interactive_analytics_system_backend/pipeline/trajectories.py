@@ -130,13 +130,14 @@ def interpolate_trajectories(
             xs = np.clip(xs, 0, OUT_W)
             ys = np.clip(ys, 0, OUT_H)
 
-        known_frame_set = set(int(f) for f in known_frames)
+        # Preserve original source labels for detected frames
+        known_source = {int(p.frame_idx): p.source for p in positions_sorted}
         for i, frame_idx in enumerate(frames_track):
             fi = int(frame_idx)
             # Use smoothed coordinates for all frames (detected and interpolated).
             # Previously, detected frames were written back as raw originals, which
             # meant SG smoothing had no effect on them — the main source of jitter.
-            source = "homography" if fi in known_frame_set else "interpolated"
+            source = known_source.get(fi, "interpolated")
             all_positions.append(PlayerPitchPosition(
                 frame_idx=fi,
                 track_id=track_id,

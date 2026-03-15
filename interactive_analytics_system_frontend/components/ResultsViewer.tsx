@@ -1,35 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { VideoMetadata, PlayerPosition, AnchorFrame } from '../types'
+import type { VideoMetadata, PlayerPosition } from '../types'
 import { drawPitch } from '../lib/pitch'
 import { PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H } from '../lib/constants'
 import { API_URL } from '../lib/api'
 
-// ---- Anchor Quality types ----
-interface KeypointQuality {
-  pitch_id: string
-  x_img: number
-  y_img: number
-  error_px: number
-  verdict: 'good' | 'high' | 'outlier'
-  impact: 'helpful' | 'marginal' | 'harmful'
-}
-
-interface AnchorQualityEntry {
-  frame_idx: number
-  n_keypoints: number
-  n_lines: number
-  mean_error_px: number
-  max_error_px: number
-  n_outlier_points: number
-  n_helpful_points: number
-  overall_quality: 'good' | 'warning' | 'bad'
-  keypoints: KeypointQuality[]
-  recommendation: string
-}
-
-interface AnchorQualityReport {
-  anchors: AnchorQualityEntry[]
-}
 
 interface ResultsViewerProps {
   videoMetadata: VideoMetadata
@@ -41,7 +15,6 @@ interface ResultsViewerProps {
   processedEndFrame: number
   homographyFrameIndices: number[]
   processedFps: number
-  anchorFrames: AnchorFrame[]
 }
 
 export default function ResultsViewer({
@@ -54,24 +27,15 @@ export default function ResultsViewer({
   processedEndFrame,
   homographyFrameIndices,
   processedFps,
-  anchorFrames,
 }: ResultsViewerProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [playbackSpeed, setPlaybackSpeed] = useState(1)
   const [isSyncMode, setIsSyncMode] = useState(true)
-  const [showHomographySidebar, setShowHomographySidebar] = useState(false)
-  const [selectedHomographyFrame, setSelectedHomographyFrame] = useState<number | null>(null)
-  const [warpedFrameUrl, setWarpedFrameUrl] = useState<string | null>(null)
-  const [loadingWarpedFrame, setLoadingWarpedFrame] = useState(false)
   const [showBotSortOverlay, setShowBotSortOverlay] = useState(false)
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null)
 
   // Debug panel state
   const [showMappingView, setShowMappingView] = useState(false)
-  const [anchorQuality, setAnchorQuality] = useState<AnchorQualityReport | null>(null)
-  const [loadingAnchorQuality, setLoadingAnchorQuality] = useState(false)
-  const [anchorQualityError, setAnchorQualityError] = useState<string | null>(null)
-  const [expandedAnchorRows, setExpandedAnchorRows] = useState<Set<number>>(new Set())
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoPlayerRef = useRef<HTMLVideoElement>(null)
@@ -183,78 +147,6 @@ export default function ResultsViewer({
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current) }
   }, [])
 
-  // Load warped frame
-  const loadWarpedFrame = useCallback(async (frameIdx: number) => {
-    setLoadingWarpedFrame(true)
-    try {
-      const url = `${API_URL}/videos/${videoMetadata.video_id}/warped-frame/${frameIdx}`
-      const response = await fetch(url)
-      if (response.ok) {
-        const blob = await response.blob()
-        setWarpedFrameUrl(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob) })
-      } else {
-        setWarpedFrameUrl(null)
-      }
-    } catch {
-      setWarpedFrameUrl(null)
-    } finally {
-      setLoadingWarpedFrame(false)
-    }
-  }, [videoMetadata.video_id])
-
-  useEffect(() => {
-    if (selectedHomographyFrame !== null) {
-      loadWarpedFrame(selectedHomographyFrame)
-    } else {
-      setWarpedFrameUrl(null)
-    }
-  }, [selectedHomographyFrame, loadWarpedFrame])
-
-  // Cleanup warped frame URL on unmount
-  useEffect(() => {
-    return () => { if (warpedFrameUrl) URL.revokeObjectURL(warpedFrameUrl) }
-  }, [warpedFrameUrl])
-
-  const getHomographyFrames = useCallback(() => {
-    if (homographyFrameIndices.length > 0) {
-      return homographyFrameIndices.map(frameIdx => {
-        const anchor = anchorFrames.find(af => af.frame_idx === frameIdx)
-        return anchor || { frame_idx: frameIdx, isSkipped: false, points: [], lines: [] }
-      })
-    }
-    return anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4)
-  }, [anchorFrames, homographyFrameIndices])
-
-  const fetchAnchorQuality = useCallback(async () => {
-    if (anchorQuality || loadingAnchorQuality) return
-    setLoadingAnchorQuality(true)
-    setAnchorQualityError(null)
-    try {
-      const res = await fetch(`${API_URL}/videos/${videoMetadata.video_id}/homographies/anchor-quality`)
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || 'Failed to load anchor quality')
-      }
-      const data: AnchorQualityReport = await res.json()
-      setAnchorQuality(data)
-    } catch (e: any) {
-      setAnchorQualityError(e.message || 'Failed to load anchor quality')
-    } finally {
-      setLoadingAnchorQuality(false)
-    }
-  }, [anchorQuality, loadingAnchorQuality, videoMetadata.video_id])
-
-  const toggleAnchorRow = useCallback((frameIdx: number) => {
-    setExpandedAnchorRows(prev => {
-      const next = new Set(prev)
-      if (next.has(frameIdx)) next.delete(frameIdx)
-      else next.add(frameIdx)
-      return next
-    })
-  }, [])
-
-  const getPointLabel = (id: string): string =>
-    id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
 
   const framesWithPositions = getFramesWithPositions()
 
@@ -295,9 +187,6 @@ export default function ResultsViewer({
           <button onClick={() => setIsSyncMode(!isSyncMode)} className={`sync-btn ${isSyncMode ? 'active' : ''}`}>
             🔗 {isSyncMode ? 'Sync ON' : 'Sync OFF'}
           </button>
-          <button onClick={() => setShowHomographySidebar(!showHomographySidebar)} className={`sidebar-toggle ${showHomographySidebar ? 'active' : ''}`}>
-            📐 Homography Info
-          </button>
           <button onClick={() => setShowBotSortOverlay(!showBotSortOverlay)} className={`sidebar-toggle ${showBotSortOverlay ? 'active' : ''}`}>
             🎯 BotSort Overlay
           </button>
@@ -323,82 +212,8 @@ export default function ResultsViewer({
 
       {/* Main content area */}
       <div className="results-content">
-        {/* Homography Sidebar */}
-        {showHomographySidebar && (
-          <div className="homography-sidebar">
-            <h3>📐 Homography Details</h3>
-            <p className="sidebar-info">
-              Homographies computed from {homographyFrameIndices.length > 0 ? homographyFrameIndices.length : getHomographyFrames().length} anchor frames.
-              Click an anchor frame to see details.
-            </p>
-            <div className="anchor-frame-list">
-              {homographyFrameIndices.length > 0 ? (
-                homographyFrameIndices.map((frameIdx, idx) => {
-                  const anchorData = anchorFrames.find(af => af.frame_idx === frameIdx)
-                  return (
-                    <div
-                      key={idx}
-                      className={`anchor-frame-item ${selectedHomographyFrame === frameIdx ? 'selected' : ''}`}
-                      onClick={() => setSelectedHomographyFrame(selectedHomographyFrame === frameIdx ? null : frameIdx)}
-                    >
-                      <span className="frame-badge">Frame {frameIdx}</span>
-                      <span className="points-count">{anchorData ? `${anchorData.points.length} points` : 'Computed'}</span>
-                    </div>
-                  )
-                })
-              ) : (
-                getHomographyFrames().map((af, idx) => (
-                  <div
-                    key={idx}
-                    className={`anchor-frame-item ${selectedHomographyFrame === af.frame_idx ? 'selected' : ''}`}
-                    onClick={() => setSelectedHomographyFrame(selectedHomographyFrame === af.frame_idx ? null : af.frame_idx)}
-                  >
-                    <span className="frame-badge">Frame {af.frame_idx}</span>
-                    <span className="points-count">{af.points.length} points</span>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {selectedHomographyFrame !== null && (
-              <div className="homography-detail">
-                <h4>Frame {selectedHomographyFrame} Annotations</h4>
-                <div className="warped-frame-section">
-                  <h5>Warped Frame Preview</h5>
-                  {loadingWarpedFrame && <p className="loading-text">Loading warped frame...</p>}
-                  {warpedFrameUrl && !loadingWarpedFrame && (
-                    <img src={warpedFrameUrl} alt={`Warped frame ${selectedHomographyFrame}`} className="warped-frame-img" />
-                  )}
-                  {!warpedFrameUrl && !loadingWarpedFrame && (
-                    <p className="no-warped-frame">Warped frame preview not available.</p>
-                  )}
-                </div>
-                {(() => {
-                  const anchorData = anchorFrames.find(af => af.frame_idx === selectedHomographyFrame)
-                  if (anchorData && anchorData.points.length > 0) {
-                    return (
-                      <div className="point-mapping-list">
-                        <h5>Keypoint Correspondences</h5>
-                        {anchorData.points.map((point, idx) => (
-                          <div key={idx} className="point-mapping">
-                            <span className="pitch-label">{getPointLabel(point.pitch_id)}</span>
-                            <span className="arrow">→</span>
-                            <span className="coords">({Math.round(point.x_img)}, {Math.round(point.y_img)})</span>
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  }
-                  return <p className="no-annotation-data">Keypoint data for this frame is available on the server.</p>
-                })()}
-                <p className="homography-note">The warped frame shows the perspective transform applied.</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Side-by-side view */}
-        <div className={`results-main ${showHomographySidebar ? 'with-sidebar' : ''}`}>
+          {/* Side-by-side view */}
+        <div className="results-main">
           <div className="video-frame-panel">
             <h4>Video Frame {currentFrame}</h4>
             {videoObjectUrl ? (
@@ -510,7 +325,7 @@ export default function ResultsViewer({
             <div style={{ width: 425, height: 300, overflow: 'hidden', border: '1px solid #ccc', borderRadius: 4 }}>
               <img
                 key={currentFrame}
-                src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/warped_with_lines`}
+                src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/warped`}
                 alt={`Warped frame ${currentFrame} with pitch lines`}
                 style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
@@ -520,83 +335,6 @@ export default function ResultsViewer({
         )}
       </details>
 
-      {/* Anchor Quality debug panel */}
-      <details
-        className="debug-panel"
-        onToggle={(e) => {
-          if ((e.target as HTMLDetailsElement).open) fetchAnchorQuality()
-        }}
-      >
-        <summary>📐 Anchor Quality</summary>
-        <div className="debug-panel-body">
-          {loadingAnchorQuality && <p className="debug-info">Loading anchor quality…</p>}
-          {anchorQualityError && <p className="debug-info" style={{ color: 'red' }}>{anchorQualityError}</p>}
-          {anchorQuality && !loadingAnchorQuality && (
-            <table className="debug-table">
-              <thead>
-                <tr>
-                  <th>Frame</th><th>Keypoints</th><th>Lines</th>
-                  <th>Mean Err</th><th>Max Err</th><th>Outliers</th><th>Quality</th>
-                </tr>
-              </thead>
-              <tbody>
-                {anchorQuality.anchors.map(a => (
-                  <>
-                    <tr
-                      key={a.frame_idx}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => toggleAnchorRow(a.frame_idx)}
-                    >
-                      <td>{a.frame_idx} {expandedAnchorRows.has(a.frame_idx) ? '▲' : '▼'}</td>
-                      <td>{a.n_keypoints}</td>
-                      <td>{a.n_lines}</td>
-                      <td>{a.mean_error_px.toFixed(1)}px</td>
-                      <td>{a.max_error_px.toFixed(1)}px</td>
-                      <td>{a.n_outlier_points}</td>
-                      <td style={{
-                        color: a.overall_quality === 'good' ? 'green'
-                          : a.overall_quality === 'warning' ? '#b8860b'
-                          : 'red',
-                        fontWeight: 'bold'
-                      }}>
-                        {a.overall_quality}
-                      </td>
-                    </tr>
-                    {expandedAnchorRows.has(a.frame_idx) && (
-                      <tr key={`${a.frame_idx}-detail`}>
-                        <td colSpan={7}>
-                          <p style={{ margin: '4px 0', fontStyle: 'italic' }}>{a.recommendation}</p>
-                          <table className="debug-table" style={{ marginBottom: 4 }}>
-                            <thead>
-                              <tr><th>Pitch ID</th><th>x_img</th><th>y_img</th><th>Error</th><th>Verdict</th><th>Impact</th></tr>
-                            </thead>
-                            <tbody>
-                              {a.keypoints.map((kp, ki) => (
-                                <tr key={ki} style={{
-                                  color: kp.verdict === 'outlier' ? 'red'
-                                    : kp.verdict === 'high' ? '#b8860b'
-                                    : 'inherit'
-                                }}>
-                                  <td>{kp.pitch_id}</td>
-                                  <td>{kp.x_img.toFixed(0)}</td>
-                                  <td>{kp.y_img.toFixed(0)}</td>
-                                  <td>{kp.error_px.toFixed(1)}px</td>
-                                  <td>{kp.verdict}</td>
-                                  <td>{kp.impact}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </details>
     </div>
   )
 }

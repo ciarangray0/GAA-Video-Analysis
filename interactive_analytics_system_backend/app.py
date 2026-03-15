@@ -201,15 +201,45 @@ def load_annotations(video_id: str) -> Optional[dict]:
     return {int(k): v for k, v in data.items()} if data is not None else None
 
 
-def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Response:
-    """Extract a video frame, apply distorted homography warp, return JPEG Response."""
+def _resolve_homography(video_id: str, frame_idx: int) -> Optional[np.ndarray]:
+    """Return the best available homography for a frame (v3 preferred, v2 fallback)."""
+    v3_hs = store.v3_homographies_cache.get(video_id) or load_v3_homographies(video_id)
+    if v3_hs:
+        return v3_hs[frame_idx] if frame_idx in v3_hs else v3_hs[min(v3_hs.keys(), key=lambda f: abs(f - frame_idx))]
+    H, _ = find_nearest_homography(video_id, frame_idx, method="v2")
+    return H
+
+
+# Reference lines for warped frame overlays: (label, y_meters, bgr_colour)
+_REFERENCE_LINES = [
+    ("13m",     13.0, (0, 200, 255)),
+    ("20m",     20.0, (0, 255, 0)),
+    ("45m",     45.0, (255, 128, 0)),
+    ("65m",     65.0, (128, 0, 255)),
+    ("halfway", 70.0, (255, 255, 0)),
+]
+
+
+def _draw_reference_lines(warped: np.ndarray) -> None:
+    """Draw horizontal pitch reference lines onto a warped canvas image (in-place)."""
+    for label, y_m, colour in _REFERENCE_LINES:
+        y_px = int(y_m / GAA_PITCH_LENGTH * OUT_H)
+        x, dash_len = 0, 20
+        while x < OUT_W:
+            cv2.line(warped, (x, y_px), (min(x + dash_len, OUT_W), y_px), colour, 2)
+            x += dash_len * 2
+        cv2.putText(warped, label, (4, y_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+
+
+def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray, distortion_mode: int = 0) -> Response:
+    """Extract a video frame, apply homography warp, return JPEG Response."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ret, frame = cap.read()
     cap.release()
     if not ret:
         raise HTTPException(status_code=500, detail="Failed to extract frame")
-    warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+    warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1, distortion_mode=distortion_mode)
     _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
@@ -296,69 +326,20 @@ async def get_frame(video_id: str, frame_idx: int):
         raise HTTPException(status_code=500, detail="Failed to extract frame")
 
 
-@app.get("/videos/{video_id}/warped-frame/{frame_idx}")
-async def get_warped_frame(video_id: str, frame_idx: int):
-    """Return a warped JPEG for an anchor frame using its computed homography."""
-    video_info = _get_video_or_404(video_id)
-
-    homographies = store.homographies_cache.get(video_id)
-    if not homographies:
-        raise HTTPException(status_code=400, detail="No homographies computed for this video")
-    if frame_idx not in homographies:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No homography for frame {frame_idx}. Available: {list(homographies.keys())}",
-        )
-
-    try:
-        return _read_and_warp_frame(video_info["path"], frame_idx, homographies[frame_idx])
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to create warped frame {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
-
-
 @app.get("/videos/{video_id}/frames/{frame_idx}/warped")
 async def get_warped_frame_any(
     video_id: str,
     frame_idx: int,
-    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
+    players: bool = Query(False, description="Overlay player positions on the warped frame"),
 ):
-    """Return a warped JPEG for any frame using the nearest anchor homography.
+    """Return a warped JPEG with pitch reference lines, and optionally player dots.
 
-    Use ``?method=v3`` to use the DLT-based v3 homographies instead of v2.
+    Always uses the best available homography (v3 per-frame if computed, else v2
+    nearest anchor). Add ``?players=true`` to overlay player positions.
     """
     video_info = _get_video_or_404(video_id)
 
-    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
-    if H is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No {method} homographies computed for this video"
-        )
-
-    try:
-        response = _read_and_warp_frame(video_info["path"], frame_idx, H)
-        response.headers["Cache-Control"] = "max-age=300"
-        return response
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed warped frame {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
-
-
-@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_players")
-async def get_warped_frame_with_players(
-    video_id: str,
-    frame_idx: int,
-    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
-):
-    """Return a warped JPEG with player positions drawn as coloured circles."""
-    video_info = _get_video_or_404(video_id)
-
-    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
+    H = _resolve_homography(video_id, frame_idx)
     if H is None:
         raise HTTPException(status_code=400, detail="No homographies computed for this video")
 
@@ -370,21 +351,25 @@ async def get_warped_frame_with_players(
         if not ret:
             raise HTTPException(status_code=500, detail="Failed to extract frame")
 
-        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+        d_mode = store.distortion_mode_cache.get(video_id, 0)
+        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1, distortion_mode=d_mode)
+        _draw_reference_lines(warped)
 
-        for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
-            x, y = int(pos.x_pitch), int(pos.y_pitch)
-            if 0 <= x < OUT_W and 0 <= y < OUT_H:
-                color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
-                cv2.circle(warped, (x, y), 8, color, -1)
-                cv2.putText(warped, str(pos.track_id), (x + 10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if players:
+            for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
+                x, y = int(pos.x_pitch), int(pos.y_pitch)
+                if 0 <= x < OUT_W and 0 <= y < OUT_H:
+                    color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
+                    cv2.circle(warped, (x, y), 8, color, -1)
+                    cv2.putText(warped, str(pos.track_id), (x + 10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+        cache = "no-cache" if players else "max-age=300"
+        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": cache})
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed warped_with_players {frame_idx} for video {video_id}: {e}")
+        logger.error(f"Failed warped frame {frame_idx} for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
 
 
@@ -514,6 +499,7 @@ async def compute_homographies_v3(
     ransac_iterations: int = Query(2000, ge=100, le=10000, description="RANSAC trials for keypoint-only H₀"),
     ransac_threshold: float = Query(5.0, ge=1.0, le=50.0, description="RANSAC inlier threshold in canvas pixels"),
     keypoint_weight: float = Query(20.0, ge=1.0, le=100.0, description="Weight multiplier for keypoints vs line samples (higher = lines reinforce more gently)"),
+    distortion_mode: int = Query(0, ge=0, le=2, description="Radial distortion mode: 0=none, 1=after H, 2=integrated into H fitting"),
 ):
     """
     Compute homography matrices using genuine DLT line constraints (v3).
@@ -545,6 +531,7 @@ async def compute_homographies_v3(
                 ransac_iterations=ransac_iterations,
                 ransac_threshold=ransac_threshold,
                 keypoint_weight=keypoint_weight,
+                distortion_mode=distortion_mode,
             )
         )
     except Exception as e:
@@ -558,6 +545,7 @@ async def compute_homographies_v3(
         )
 
     store.v3_anchor_homographies_cache[video_id] = anchor_homographies
+    store.distortion_mode_cache[video_id] = distortion_mode
     save_v3_anchor_homographies(video_id, anchor_homographies)
     save_annotations(video_id, annotations_dict)
 
@@ -584,12 +572,13 @@ async def compute_homographies_v3(
 
     logger.info(
         f"v3 DLT: computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
-        f"for video {video_id}"
+        f"for video {video_id} (distortion_mode={distortion_mode})"
     )
 
     return {
         "frames": sorted(anchor_homographies.keys()),
         "per_frame_count": len(per_frame_hs),
+        "distortion_mode": distortion_mode,
         "info": {str(k): v for k, v in computation_info.items()},
     }
 
@@ -636,8 +625,13 @@ async def map_players(video_id: str):
     )
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
+    distortion_mode = store.distortion_mode_cache.get(video_id, 0)
     try:
-        positions = map_players_to_pitch(detections, homographies, anchor_frame_indices=anchor_frame_indices)
+        positions = map_players_to_pitch(
+            detections, homographies,
+            anchor_frame_indices=anchor_frame_indices,
+            distortion_mode=distortion_mode,
+        )
         store.player_positions_cache[video_id] = positions
     except Exception as e:
         logger.error(f"Player mapping failed for video {video_id}: {e}")
@@ -647,50 +641,6 @@ async def map_players(video_id: str):
     return positions
 
 
-# Reference lines for the warped_with_lines overlay: (label, y_meters, bgr_colour)
-_REFERENCE_LINES = [
-    ("13m",     13.0, (0, 200, 255)),
-    ("20m",     20.0, (0, 255, 0)),
-    ("45m",     45.0, (255, 128, 0)),
-    ("65m",     65.0, (128, 0, 255)),
-    ("halfway", 70.0, (255, 255, 0)),
-]
-
-
-@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_lines")
-async def get_warped_frame_with_lines(video_id: str, frame_idx: int):
-    """Return a warped JPEG with horizontal pitch reference lines overlaid."""
-    video_info = _get_video_or_404(video_id)
-
-    H, _ = find_nearest_homography(video_id, frame_idx)
-    if H is None:
-        raise HTTPException(status_code=400, detail="No homographies computed for this video")
-
-    try:
-        cap = cv2.VideoCapture(video_info["path"])
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            raise HTTPException(status_code=500, detail="Failed to extract frame")
-
-        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
-
-        for label, y_m, colour in _REFERENCE_LINES:
-            y_px = int(y_m / GAA_PITCH_LENGTH * OUT_H)
-            x, dash_len = 0, 20
-            while x < OUT_W:
-                cv2.line(warped, (x, y_px), (min(x + dash_len, OUT_W), y_px), colour, 2)
-                x += dash_len * 2
-            cv2.putText(warped, label, (4, y_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
-
-        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=300"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed warped_with_lines {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
 
 
 @app.get("/videos/{video_id}/homographies/anchor-quality")
@@ -834,7 +784,7 @@ async def interpolate_trajectories_endpoint(
 
         existing_filtered = [
             p for p in sparse_positions
-            if not (start_frame <= p.frame_idx <= end_frame and p.source == "interpolated")
+            if not (start_frame <= p.frame_idx <= end_frame)
         ]
         store.player_positions_cache[video_id] = existing_filtered + interpolated
 

@@ -25,6 +25,7 @@ def map_players_to_pitch(
     k1: float = K1,
     use_nearest_anchor: bool = False,
     anchor_frame_indices: Optional[Set[int]] = None,
+    distortion_mode: int = 0,
 ) -> List[PlayerPitchPosition]:
     """
     Map player detections to pitch canvas coordinates.
@@ -84,8 +85,9 @@ def map_players_to_pitch(
         x_center = (det.x1 + det.x2) / 2
         y_bottom = det.y2
 
+        effective_k1 = 0.0 if distortion_mode == 0 else k1
         x_pitch, y_pitch = map_pixel_to_pitch(
-            x_center, y_bottom, H, out_w, out_h, k1
+            x_center, y_bottom, H, out_w, out_h, effective_k1
         )
 
         positions.append(PlayerPitchPosition(

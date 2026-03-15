@@ -1,10 +1,18 @@
 """Homography computation and pixel-to-pitch mapping.
 
 Coordinate System:
-    Image pixels (camera) → Homography H → Pitch canvas pixels → Radial distortion → Output
+    Image pixels (camera) → Homography H → Pitch canvas pixels [ → Radial distortion ] → Output
 
 The pitch canvas is OUT_W × OUT_H pixels (850 × 1400).  Meters are never used
-after the destination points are set up.  Radial distortion (K1) is always applied.
+after the destination points are set up.
+
+Distortion modes
+----------------
+0 — none        k1=0 everywhere; H is the complete image→canvas transform.
+1 — after       H fitted on raw canvas coords; forward distortion applied in canvas
+                space after H (original notebook approach).
+2 — integrated  H fitted on inverse-distorted canvas coords so the DLT calibration
+                accounts for distortion; forward distortion applied after H as in mode 1.
 """
 import re
 from typing import Dict, List, Optional, Tuple
@@ -27,6 +35,24 @@ _PITCH_M_H = 140.0
 def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:
     """Convert pitch vertex coordinates (meters) to canvas pixels."""
     return x_m / _PITCH_M_W * OUT_W, y_m / _PITCH_M_H * OUT_H
+
+
+def inverse_radial_distortion(
+    x_d: float, y_d: float, cx: float, cy: float, k1: float, n_iter: int = 4
+) -> Tuple[float, float]:
+    """Iteratively invert forward radial distortion x' = x + (x-cx)*k1*r².
+
+    Converges in 3-4 iterations for small k1 (e.g. 8e-8).
+    Used for mode 2 (integrated): undistort canvas annotation coords before DLT
+    so H maps image pixels → pre-distortion canvas space.
+    """
+    x, y = x_d, y_d
+    for _ in range(n_iter):
+        dx, dy = x - cx, y - cy
+        r2 = dx * dx + dy * dy
+        x = x_d - dx * k1 * r2
+        y = y_d - dy * k1 * r2
+    return x, y
 
 
 def _compute_coverage_score(
@@ -332,6 +358,7 @@ def compute_homographies_with_lines_v3(
     keypoint_weight: float = 20.0,
     img_width: Optional[int] = None,
     img_height: Optional[int] = None,
+    distortion_mode: int = 0,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
     """Compute anchor homographies: keypoints define H, lines reinforce it.
 
@@ -377,6 +404,16 @@ def compute_homographies_with_lines_v3(
             [_meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id)) for p in keypoints],
             dtype=np.float64,
         )
+
+        # Mode 2 — integrated: inverse-distort canvas coords before DLT so H
+        # maps image pixels → pre-distortion canvas space.  Forward distortion is
+        # then applied consistently when mapping players (same as mode 1).
+        if distortion_mode == 2:
+            cx_d, cy_d = OUT_W / 2.0, OUT_H / 2.0
+            pts_canvas = np.array(
+                [inverse_radial_distortion(x, y, cx_d, cy_d, K1) for x, y in pts_canvas],
+                dtype=np.float64,
+            )
 
         # Step 1 — Primary H from keypoints only (RANSAC)
         H0, _ = cv2.findHomography(

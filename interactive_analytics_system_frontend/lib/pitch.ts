@@ -199,7 +199,18 @@ export function drawPitch(
     )
   }
 
-  const framePositions = positions.filter(p => p.frame_idx === frame)
+  // Filter out tracks present for fewer than 30 frames (~1 second at ~30fps)
+  const MIN_TRACK_FRAMES = 30
+  const trackFrameCounts = new Map<number, number>()
+  for (const p of positions) {
+    trackFrameCounts.set(p.track_id, (trackFrameCounts.get(p.track_id) ?? 0) + 1)
+  }
+  const validTrackIds = new Set<number>()
+  trackFrameCounts.forEach((count, id) => {
+    if (count >= MIN_TRACK_FRAMES) validTrackIds.add(id)
+  })
+
+  const framePositions = positions.filter(p => p.frame_idx === frame && validTrackIds.has(p.track_id))
   const activeTrackIds = new Set(framePositions.map(p => p.track_id))
 
   const outOfBounds = framePositions.filter(
@@ -213,7 +224,7 @@ export function drawPitch(
 
   // For each track that has been seen at some point up to this frame but is
   // not active now, find its most recent position and draw a grey ghost dot.
-  const pastPositions = positions.filter(p => p.frame_idx < frame)
+  const pastPositions = positions.filter(p => p.frame_idx < frame && validTrackIds.has(p.track_id))
   const lastKnownByTrack = new Map<number, PlayerPosition>()
   for (const p of pastPositions) {
     const existing = lastKnownByTrack.get(p.track_id)
