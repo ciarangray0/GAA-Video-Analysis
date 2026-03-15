@@ -12,11 +12,6 @@ export interface LineAnnotation {
   v2: number
 }
 
-export interface PitchAnnotation {
-  frame_idx: number
-  points: PitchPoint[]
-}
-
 export interface AnchorFrameAnnotation {
   frame_idx: number
   points: PitchPoint[]
@@ -29,16 +24,6 @@ export interface PlayerPosition {
   x_pitch: number
   y_pitch: number
   source: string
-}
-
-export interface ProcessResponse {
-  video_id: string
-  status: string
-  player_positions?: PlayerPosition[]
-  homography_frames?: number[]
-  start_frame?: number
-  end_frame?: number
-  fps?: number
 }
 
 export interface VideoMetadata {

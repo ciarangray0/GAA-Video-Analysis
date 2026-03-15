@@ -32,6 +32,32 @@ interface PerFrameMappingData {
   summary: PerFrameMappingSummary | null
 }
 
+interface AnchorQualityPoint {
+  pitch_id: string
+  x_img: number
+  y_img: number
+  error_px: number
+  verdict: 'good' | 'high' | 'outlier'
+  impact: 'helpful' | 'marginal' | 'harmful'
+}
+
+interface AnchorQualityFrame {
+  frame_idx: number
+  n_keypoints: number
+  n_lines: number
+  mean_error_px: number
+  max_error_px: number
+  n_outlier_points: number
+  n_helpful_points: number
+  overall_quality: 'good' | 'warning' | 'bad'
+  keypoints: AnchorQualityPoint[]
+  recommendation: string
+}
+
+interface AnchorQualityData {
+  anchors: AnchorQualityFrame[]
+}
+
 interface PipelineStepsProps {
   videoMetadata: VideoMetadata | null
   anchorFrames: AnchorFrame[]
@@ -67,6 +93,30 @@ function reprErrorColor(val: number | undefined): string {
   return '#cc2222'
 }
 
+function qualityBadge(q: string): string {
+  if (q === 'good') return '✅ good'
+  if (q === 'warning') return '⚠️ warning'
+  return '❌ bad'
+}
+
+function qualityColor(q: string): string {
+  if (q === 'good') return '#2d7a2d'
+  if (q === 'warning') return '#b8860b'
+  return '#cc2222'
+}
+
+function verdictBadge(v: string): string {
+  if (v === 'good') return '✓'
+  if (v === 'high') return '⚠'
+  return '✗'
+}
+
+function impactColor(impact: string): string {
+  if (impact === 'helpful') return '#2d7a2d'
+  if (impact === 'marginal') return '#b8860b'
+  return '#cc2222'
+}
+
 export default function PipelineSteps({
   videoMetadata,
   anchorFrames,
@@ -90,8 +140,15 @@ export default function PipelineSteps({
   const [perFrameData, setPerFrameData] = useState<PerFrameMappingData | null>(null)
   const [loadingDiagnostic, setLoadingDiagnostic] = useState(false)
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
+  const [anchorQuality, setAnchorQuality] = useState<AnchorQualityData | null>(null)
+  const [anchorQualityError, setAnchorQualityError] = useState<string | null>(null)
+  // Incremented each time step B completes, used to bust the browser image cache
+  const [stepBVersion, setStepBVersion] = useState(0)
+  // Step D smoothing params
+  const [sgLongWindow, setSgLongWindow] = useState(15)
+  const [sgMidWindow, setSgMidWindow] = useState(11)
+  const [maxVelPx, setMaxVelPx] = useState(4.0)
 
-  // Internal fetch wrapper that logs API calls
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
     const method = options?.method || 'GET'
     logApiCall(`→ ${method} ${url}`)
@@ -131,20 +188,23 @@ export default function PipelineSteps({
   const runStepB = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
 
+    // A frame is usable if it has any manual points OR any line annotations —
+    // line intersections will derive the required keypoints automatically.
     const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
-      .filter(af => !af.isSkipped && af.points.length >= 4)
+      .filter(af => !af.isSkipped && (af.points.length > 0 || (af.lines || []).length > 0))
       .map(af => ({ frame_idx: af.frame_idx, points: af.points, lines: af.lines || [] }))
 
     if (validAnnotations.length === 0) {
-      onError('Please annotate at least one anchor frame with 4+ points')
+      onError('Please annotate at least one anchor frame with points or line annotations')
       return
     }
 
     onRunningStepChange('B', 'add')
     onError('')
+    setAnchorQuality(null)
+    setAnchorQualityError(null)
     try {
-      // Always use v2 — it works without lines and propagates per-frame Hs
-      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v2`
+      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v3`
 
       const res = await apiFetch(endpoint, {
         method: 'POST',
@@ -162,8 +222,23 @@ export default function PipelineSteps({
         info: data.info || {},
       }
       onStepBComplete(result, data.frames || [])
+      setStepBVersion(v => v + 1)
       onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['B'])
+
+      // Immediately fetch anchor quality so the user sees per-point errors
+      try {
+        const qRes = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/homographies/anchor-quality`)
+        if (qRes.ok) {
+          const qData: AnchorQualityData = await qRes.json()
+          setAnchorQuality(qData)
+        } else {
+          const qErr = await qRes.json()
+          setAnchorQualityError(qErr.detail || 'Anchor quality fetch failed')
+        }
+      } catch (qe: any) {
+        setAnchorQualityError(qe.message || 'Anchor quality fetch failed')
+      }
     } catch (err: any) {
       onError(err.message || 'Homography computation failed')
     } finally {
@@ -199,7 +274,9 @@ export default function PipelineSteps({
     onRunningStepChange('D', 'add')
     onError('')
     try {
-      const data = await interpolateTrajectories(videoMetadata.video_id, startFrame, endFrame)
+      const data = await interpolateTrajectories(videoMetadata.video_id, startFrame, endFrame, {
+        sgLongWindow, sgMidWindow, maxVelPx,
+      })
       onStepsClearedStale(['D'])
       const allPositions = await getPlayerPositions(videoMetadata.video_id)
       onStepDComplete(data, allPositions, startFrame, endFrame, videoMetadata.fps)
@@ -209,7 +286,7 @@ export default function PipelineSteps({
     } finally {
       onRunningStepChange('D', 'remove')
     }
-  }, [videoMetadata, stepCResult, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
+  }, [videoMetadata, stepCResult, sgLongWindow, sgMidWindow, maxVelPx, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
 
   const loadPerFrameDiagnostic = useCallback(async () => {
     if (!videoMetadata) return
@@ -230,13 +307,13 @@ export default function PipelineSteps({
     }
   }, [videoMetadata, apiFetch])
 
+  // A frame is valid if it has any annotations (points or lines)
   const validAnnotationCount = useMemo(
-    () => anchorFrames.filter(af => !af.isSkipped && af.points.length >= 4).length,
+    () => anchorFrames.filter(af => !af.isSkipped && (af.points.length > 0 || (af.lines || []).length > 0)).length,
     [anchorFrames]
   )
 
   if (!videoMetadata) return null
-
 
   return (
     <div className="process-section">
@@ -273,6 +350,8 @@ export default function PipelineSteps({
             <p>✅ Homographies computed for {stepBResult.frames.length} anchor frames</p>
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
             <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
+
+            {/* Per-anchor summary table */}
             {Object.keys(stepBResult.info).length > 0 && (
               <table className="debug-table">
                 <thead>
@@ -301,13 +380,154 @@ export default function PipelineSteps({
                         <td style={{ color: reprErrorColor(info.repr_max) }}>
                           {reprErrorLabel(info.repr_max)}
                         </td>
-                        <td>{info.line_warnings ? info.line_warnings.join('; ') : '—'}</td>
+                        <td style={{ fontSize: '0.8em' }}>{info.line_warnings?.length ? info.line_warnings.join('; ') : '—'}</td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
             )}
+
+            {/* Anchor quality — per-point reprojection breakdown */}
+            {anchorQualityError && (
+              <p style={{ color: '#cc2222', marginTop: '8px' }}>Anchor quality: {anchorQualityError}</p>
+            )}
+            {anchorQuality && anchorQuality.anchors.length > 0 && (
+              <details className="step-details" style={{ marginTop: '10px' }} open>
+                <summary><strong>Annotation Quality — per-keypoint reprojection errors</strong></summary>
+                <div style={{ marginTop: '8px' }}>
+                  {anchorQuality.anchors.map(anchor => (
+                    <div key={anchor.frame_idx} style={{ marginBottom: '16px' }}>
+                      <p style={{ margin: '4px 0' }}>
+                        <strong>Frame {anchor.frame_idx}</strong>
+                        {' — '}
+                        <span style={{ color: qualityColor(anchor.overall_quality), fontWeight: 600 }}>
+                          {qualityBadge(anchor.overall_quality)}
+                        </span>
+                        {' · '}
+                        mean: <span style={{ color: reprErrorColor(anchor.mean_error_px) }}>{anchor.mean_error_px}px</span>
+                        {' · '}
+                        max: <span style={{ color: reprErrorColor(anchor.max_error_px) }}>{anchor.max_error_px}px</span>
+                        {anchor.n_outlier_points > 0 && (
+                          <span style={{ color: '#cc2222', marginLeft: '8px' }}>
+                            {anchor.n_outlier_points} outlier{anchor.n_outlier_points > 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </p>
+                      <p style={{ fontSize: '0.85em', color: '#555', margin: '2px 0 6px 0' }}>
+                        {anchor.recommendation}
+                      </p>
+                      <table className="debug-table">
+                        <thead>
+                          <tr>
+                            <th>pitch_id</th>
+                            <th>error (px)</th>
+                            <th>verdict</th>
+                            <th>impact</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {anchor.keypoints
+                            .slice()
+                            .sort((a, b) => b.error_px - a.error_px)
+                            .map(kp => (
+                              <tr key={kp.pitch_id} style={{ opacity: kp.impact === 'harmful' ? 1 : 0.85 }}>
+                                <td style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>{kp.pitch_id}</td>
+                                <td style={{ color: reprErrorColor(kp.error_px), fontWeight: kp.verdict === 'outlier' ? 700 : 400 }}>
+                                  {kp.error_px}px {verdictBadge(kp.verdict)}
+                                </td>
+                                <td style={{ color: reprErrorColor(kp.error_px) }}>{kp.verdict}</td>
+                                <td style={{ color: impactColor(kp.impact) }}>{kp.impact}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {/* Per-frame mapping diagnostic */}
+            <details className="step-details" style={{ marginTop: '10px' }}>
+              <summary>Per-Frame Mapping Diagnostic (20m_top accuracy)</summary>
+              <div style={{ marginTop: '8px' }}>
+                <p style={{ fontSize: '0.85em', color: '#555' }}>
+                  Measures per-frame H vs nearest-anchor H accuracy using annotated 20m_top line midpoints.
+                  Requires at least one anchor frame annotated with a 20m_top line.
+                </p>
+                <button
+                  onClick={loadPerFrameDiagnostic}
+                  disabled={loadingDiagnostic}
+                  className="process-btn"
+                  style={{ marginBottom: '8px' }}
+                >
+                  {loadingDiagnostic ? 'Loading…' : 'Load Diagnostic'}
+                </button>
+                {diagnosticError && <p style={{ color: 'red' }}>{diagnosticError}</p>}
+                {perFrameData && perFrameData.frames.length === 0 && (
+                  <p>No frames available — annotate at least one anchor frame with a 20m_top line.</p>
+                )}
+                {perFrameData?.summary && (
+                  <>
+                    <p><strong>Summary (20m_top line mapping error)</strong></p>
+                    <table className="debug-table">
+                      <thead>
+                        <tr><th></th><th>Median (px)</th><th>Mean (px)</th><th>Max (px)</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Per-frame H</td>
+                          <td>{perFrameData.summary.median_pf}</td>
+                          <td>{perFrameData.summary.mean_pf}</td>
+                          <td>{perFrameData.summary.max_pf}</td>
+                        </tr>
+                        <tr>
+                          <td>Nearest anchor H</td>
+                          <td>{perFrameData.summary.median_na}</td>
+                          <td>{perFrameData.summary.mean_na}</td>
+                          <td>{perFrameData.summary.max_na}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <p>Per-frame H better on <strong>{perFrameData.summary.pct_better}%</strong> of frames (by &gt;2px)</p>
+                  </>
+                )}
+                {perFrameData && perFrameData.frames.length > 0 && (
+                  <details style={{ marginTop: '8px' }}>
+                    <summary>Frame-by-frame data ({perFrameData.frames.length} frames)</summary>
+                    <table className="debug-table">
+                      <thead>
+                        <tr>
+                          <th>Frame</th>
+                          <th>PF y (px)</th>
+                          <th>NA y (px)</th>
+                          <th>PF err (px)</th>
+                          <th>NA err (px)</th>
+                          <th>Improvement (px)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {perFrameData.frames.map(r => (
+                          <tr key={r.frame}>
+                            <td>{r.frame}</td>
+                            <td>{r.y_pf}</td>
+                            <td>{r.y_na}</td>
+                            <td>{r.err_pf}</td>
+                            <td>{r.err_na}</td>
+                            <td style={{ color: r.improvement > 0 ? '#2d7a2d' : r.improvement < 0 ? '#cc2222' : undefined }}>
+                              {r.improvement > 0 ? '+' : ''}{r.improvement}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                )}
+              </div>
+            </details>
+
+            {/* Warped frame previews */}
             <div className="warped-thumbs">
               {stepBResult.frames.map(f => (
                 <div key={f} className="warped-thumb-item">
@@ -319,12 +539,12 @@ export default function PipelineSteps({
                     </div>
                     <div>
                       <p className="thumb-sublabel">Warped</p>
-                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped`} alt={`Warped frame ${f}`} className="thumb-img" />
+                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?method=v3&v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
                     </div>
                     {stepCResult && (
                       <div>
                         <p className="thumb-sublabel">With Players</p>
-                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players`} alt={`Warped with players frame ${f}`} className="thumb-img" />
+                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players?method=v3&v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
                       </div>
                     )}
                   </div>
@@ -376,6 +596,32 @@ export default function PipelineSteps({
           <h4>Step D: Interpolate Trajectories</h4>
           {staleSteps.has('D') && <span className="stale-badge">STALE</span>}
         </div>
+        <div className="config-row" style={{ gap: 16, marginBottom: 10 }}>
+          <label style={{ fontSize: 13 }}>
+            SG window (long tracks &gt;20f):&nbsp;
+            <input
+              type="number" min={3} max={51} step={2} value={sgLongWindow}
+              onChange={e => setSgLongWindow(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
+          <label style={{ fontSize: 13 }}>
+            SG window (mid tracks 10–20f):&nbsp;
+            <input
+              type="number" min={3} max={31} step={2} value={sgMidWindow}
+              onChange={e => setSgMidWindow(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
+          <label style={{ fontSize: 13 }}>
+            Max vel (px/frame):&nbsp;
+            <input
+              type="number" min={0} max={50} step={0.5} value={maxVelPx}
+              onChange={e => setMaxVelPx(Number(e.target.value))}
+              style={{ width: 52 }}
+            />
+          </label>
+        </div>
         <button onClick={runStepD} disabled={runningSteps.has('D') || !stepCResult} className="process-btn">
           {runningSteps.has('D') ? 'Interpolating...' : 'Interpolate'}
         </button>
@@ -386,89 +632,6 @@ export default function PipelineSteps({
           </div>
         )}
       </div>
-
-      {/* Per-frame mapping diagnostic (only shown after Step D) */}
-      {stepDResult && (
-        <div className="pipeline-step">
-          <details className="step-details">
-            <summary>Per-Frame Mapping Diagnostic</summary>
-            <div style={{ marginTop: '8px' }}>
-              <p style={{ fontSize: '0.85em', color: '#555' }}>
-                Measures per-frame H vs nearest-anchor H accuracy using annotated 20m_top line points as simulated players.
-                Requires at least one anchor frame annotated with a 20m_top line.
-              </p>
-              <button
-                onClick={loadPerFrameDiagnostic}
-                disabled={loadingDiagnostic}
-                className="process-btn"
-                style={{ marginBottom: '8px' }}
-              >
-                {loadingDiagnostic ? 'Loading…' : 'Load Diagnostic'}
-              </button>
-              {diagnosticError && <p style={{ color: 'red' }}>{diagnosticError}</p>}
-              {perFrameData && perFrameData.frames.length === 0 && (
-                <p>No frames available — ensure at least one anchor has a 20m_top line annotation.</p>
-              )}
-              {perFrameData && perFrameData.summary && (
-                <>
-                  <p><strong>Summary (20m_top line mapping error)</strong></p>
-                  <table className="debug-table">
-                    <thead>
-                      <tr><th></th><th>Median (px)</th><th>Mean (px)</th><th>Max (px)</th></tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>Per-frame H</td>
-                        <td>{perFrameData.summary.median_pf}</td>
-                        <td>{perFrameData.summary.mean_pf}</td>
-                        <td>{perFrameData.summary.max_pf}</td>
-                      </tr>
-                      <tr>
-                        <td>Nearest anchor H</td>
-                        <td>{perFrameData.summary.median_na}</td>
-                        <td>{perFrameData.summary.mean_na}</td>
-                        <td>{perFrameData.summary.max_na}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <p>Per-frame H better on <strong>{perFrameData.summary.pct_better}%</strong> of frames (by &gt;2px)</p>
-                </>
-              )}
-              {perFrameData && perFrameData.frames.length > 0 && (
-                <details style={{ marginTop: '8px' }}>
-                  <summary>Frame-by-frame data ({perFrameData.frames.length} frames)</summary>
-                  <table className="debug-table">
-                    <thead>
-                      <tr>
-                        <th>Frame</th>
-                        <th>PF y (px)</th>
-                        <th>NA y (px)</th>
-                        <th>PF err (px)</th>
-                        <th>NA err (px)</th>
-                        <th>Improvement (px)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {perFrameData.frames.map(r => (
-                        <tr key={r.frame}>
-                          <td>{r.frame}</td>
-                          <td>{r.y_pf}</td>
-                          <td>{r.y_na}</td>
-                          <td>{r.err_pf}</td>
-                          <td>{r.err_na}</td>
-                          <td style={{ color: r.improvement > 0 ? '#2d7a2d' : r.improvement < 0 ? '#cc2222' : undefined }}>
-                            {r.improvement > 0 ? '+' : ''}{r.improvement}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </details>
-              )}
-            </div>
-          </details>
-        </div>
-      )}
     </div>
   )
 }

@@ -1,46 +1,20 @@
-import json
 from io import BytesIO
 
 
 def test_upload_video_and_track(client, sample_video_metadata, monkeypatch, sample_detections):
-    # Monkeypatch run_tracking to return sample detections
-    def fake_run_tracking(path):
-        return sample_detections
-    monkeypatch.setattr("pipeline.detect.run_tracking", fake_run_tracking)
-    # `app.run_tracking` may not exist because the import is lazy; allow setting it without raising
-    monkeypatch.setattr("app.run_tracking", fake_run_tracking, raising=False)
+    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
+    monkeypatch.setattr("app.run_tracking", lambda path: sample_detections, raising=False)
 
-    # Upload a fake video file
     fake_file = BytesIO(b"fake mp4 data")
-    response = client.post(
-        "/videos",
-        files={"file": ("test.mp4", fake_file, "video/mp4")}
-    )
+    response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
     assert response.status_code == 200
-    body = response.json()
-    video_id = body["video_id"]
+    video_id = response.json()["video_id"]
 
-    # Run tracking
     resp2 = client.post(f"/videos/{video_id}/track")
     assert resp2.status_code == 200
     body2 = resp2.json()
     assert body2["frames_processed"] >= 1
     assert body2["tracks"] >= 1
-
-
-def test_homographies_endpoint(client, sample_video_metadata, sample_annotations):
-    # Upload a fake video first
-    fake_file = BytesIO(b"fake mp4 data")
-    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
-    assert r.status_code == 200
-    vid = r.json()["video_id"]
-
-    # Compute homographies with good annotations
-    payload = [a.dict() for a in sample_annotations]
-    resp = client.post(f"/videos/{vid}/homographies", json=payload)
-    assert resp.status_code == 200
-    frames = resp.json()["frames"]
-    assert 0 in frames
 
 
 def test_homographies_v2_with_lines(client, sample_video_metadata, sample_anchor_frame_annotations):
@@ -50,14 +24,7 @@ def test_homographies_v2_with_lines(client, sample_video_metadata, sample_anchor
     assert r.status_code == 200
     vid = r.json()["video_id"]
 
-    # Use model_dump() for Pydantic v2 compatibility, fallback to dict() for v1
-    payload = []
-    for a in sample_anchor_frame_annotations:
-        if hasattr(a, 'model_dump'):
-            payload.append(a.model_dump())
-        else:
-            payload.append(a.dict())
-
+    payload = [a.model_dump() for a in sample_anchor_frame_annotations]
     resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
     assert resp.status_code == 200
     result = resp.json()
@@ -67,22 +34,15 @@ def test_homographies_v2_with_lines(client, sample_video_metadata, sample_anchor
 
 
 def test_homographies_v2_without_lines(client, sample_video_metadata, sample_anchor_frame_annotations_no_lines):
-    """Test the v2 endpoint works without line constraints (backwards compatible)."""
+    """Test the v2 endpoint works without line constraints."""
     fake_file = BytesIO(b"fake mp4 data")
     r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
     vid = r.json()["video_id"]
 
-    payload = []
-    for a in sample_anchor_frame_annotations_no_lines:
-        if hasattr(a, 'model_dump'):
-            payload.append(a.model_dump())
-        else:
-            payload.append(a.dict())
-
+    payload = [a.model_dump() for a in sample_anchor_frame_annotations_no_lines]
     resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
     assert resp.status_code == 200
-    result = resp.json()
-    assert 0 in result["frames"]
+    assert 0 in resp.json()["frames"]
 
 
 def test_get_available_lines(client):
@@ -95,141 +55,87 @@ def test_get_available_lines(client):
     assert "halfway" in result["lines"]
 
 
-def test_homographies_bad_annotations(client, sample_video_metadata, bad_annotations):
+def test_homographies_v2_bad_annotations(client, sample_video_metadata):
+    """Test that v2 endpoint returns 400 when fewer than 4 keypoints are provided."""
     fake_file = BytesIO(b"fake mp4 data")
     r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
     vid = r.json()["video_id"]
 
-    payload = [a.dict() for a in bad_annotations]
-    resp = client.post(f"/videos/{vid}/homographies", json=payload)
+    payload = [{"frame_idx": 0, "points": [
+        {"pitch_id": "corner_tl", "x_img": 0, "y_img": 0},
+        {"pitch_id": "corner_tr", "x_img": 400, "y_img": 0},
+    ], "lines": []}]
+    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
     assert resp.status_code == 400
 
 
-def test_map_players_and_interpolate_full_flow(client, monkeypatch, sample_video_metadata, sample_detections, sample_annotations, sample_homography, sample_positions):
-    # Patch run_tracking
+def test_map_players_and_interpolate_full_flow(
+    client, monkeypatch, sample_video_metadata, sample_detections,
+    sample_anchor_frame_annotations, sample_homography, sample_positions
+):
     monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
-    # Upload video
+
     fake_file = BytesIO(b"fake mp4 data")
     r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
     vid = r.json()["video_id"]
 
-    # Run tracking
     client.post(f"/videos/{vid}/track")
 
-    # Compute homographies (patch compute function to return our sample homography)
-    monkeypatch.setattr("pipeline.homography.compute_homographies_from_annotations", lambda ann: sample_homography)
-    payload = [a.dict() for a in sample_annotations]
-    client.post(f"/videos/{vid}/homographies", json=payload)
+    # Patch v2 pipeline functions
+    monkeypatch.setattr(
+        "pipeline.homography.compute_homographies_with_lines",
+        lambda ann, **kw: (sample_homography, {0: {"valid_lines": 0}}),
+    )
+    monkeypatch.setattr(
+        "pipeline.constrained_homography.build_constrained_per_frame_H",
+        lambda path, anchors, **kw: (sample_homography, {}),
+    )
 
-    # Map players
+    payload = [a.model_dump() for a in sample_anchor_frame_annotations]
+    client.post(f"/videos/{vid}/homographies/v2", json=payload)
+
     resp = client.post(f"/videos/{vid}/map_players")
     assert resp.status_code == 200
-    positions = resp.json()
-    assert len(positions) >= 1
+    assert len(resp.json()) >= 1
 
-    # Patch interpolate to return a small interpolated list (simulate behavior)
-    def fake_interpolate(positions, start, end):
-        # Return one interpolated position for frame 1
-        return [
-            {
-                "frame_idx": 1,
-                "track_id": positions[0]["track_id"] if isinstance(positions[0], dict) else positions[0].track_id,
-                "x_pitch": 123.0,
-                "y_pitch": 456.0,
-                "source": "interpolated"
-            }
-        ]
-
-    monkeypatch.setattr("pipeline.trajectories.interpolate_trajectories", fake_interpolate)
-
+    monkeypatch.setattr(
+        "pipeline.trajectories.interpolate_trajectories",
+        lambda positions, start, end: [],
+    )
     resp2 = client.post(f"/videos/{vid}/interpolate?start_frame=0&end_frame=5")
     assert resp2.status_code == 200
-    body = resp2.json()
-    assert body["method"] == "linear"
-
-
-def test_process_video_full_pipeline(client, monkeypatch, sample_annotations, sample_homography, sample_detections, sample_positions, sample_video_metadata):
-    # Patch heavy functions
-    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
-    monkeypatch.setattr("pipeline.homography.compute_homographies_from_annotations", lambda ann: sample_homography)
-    monkeypatch.setattr("pipeline.map_players.map_players_to_pitch", lambda dets, homogs: sample_positions)
-    monkeypatch.setattr("pipeline.trajectories.interpolate_trajectories", lambda pos, s, e: [])
-
-    annotations_json = json.dumps([a.model_dump() for a in sample_annotations])
-    fake_file = BytesIO(b"fake mp4 data")
-    resp = client.post(
-        "/process-video",
-        data={"annotations_json": annotations_json},
-        files={"file": ("v.mp4", fake_file, "video/mp4")}
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "completed"
-    assert "player_positions" in body
+    assert resp2.json()["method"] == "linear"
 
 
 def test_get_frame_video_not_found(client):
-    """Test frame extraction returns 404 for non-existent video."""
     response = client.get("/videos/nonexistent-id/frame/0")
     assert response.status_code == 404
 
 
 def test_get_frame_invalid_frame_index(client, sample_video_metadata, monkeypatch):
-    """Test frame extraction returns 400 for invalid frame index."""
-    # Mock extract_frame to avoid needing real video
     monkeypatch.setattr("app.extract_frame", lambda path, idx: b"fake jpeg data")
 
-    # Upload a fake video
     fake_file = BytesIO(b"fake mp4 data")
     response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
     video_id = response.json()["video_id"]
 
-    # Request frame beyond video length
     resp = client.get(f"/videos/{video_id}/frame/100")
     assert resp.status_code == 400
 
 
 def test_get_frame_success(client, sample_video_metadata, monkeypatch):
-    """Test successful frame extraction."""
     fake_jpeg = b"\xff\xd8\xff\xe0fake jpeg data"
     monkeypatch.setattr("app.extract_frame", lambda path, idx: fake_jpeg)
 
-    # Upload a fake video
     fake_file = BytesIO(b"fake mp4 data")
     response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
     video_id = response.json()["video_id"]
 
-    # Request valid frame
     resp = client.get(f"/videos/{video_id}/frame/0")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/jpeg"
 
 
 def test_track_video_not_found(client):
-    """Test tracking returns 404 for non-existent video."""
     response = client.post("/videos/nonexistent-id/track")
     assert response.status_code == 404
-
-
-def test_process_video_with_trim_params(client, monkeypatch, sample_annotations, sample_homography, sample_detections, sample_positions, sample_video_metadata):
-    """Test process-video with start_frame and end_frame parameters."""
-    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
-    monkeypatch.setattr("pipeline.homography.compute_homographies_from_annotations", lambda ann: sample_homography)
-    monkeypatch.setattr("pipeline.map_players.map_players_to_pitch", lambda dets, homogs: sample_positions)
-    monkeypatch.setattr("pipeline.trajectories.interpolate_trajectories", lambda pos, s, e: [])
-
-    annotations_json = json.dumps([a.model_dump() for a in sample_annotations])
-    fake_file = BytesIO(b"fake mp4 data")
-    resp = client.post(
-        "/process-video",
-        data={
-            "annotations_json": annotations_json,
-            "start_frame": "0",
-            "end_frame": "5"
-        },
-        files={"file": ("v.mp4", fake_file, "video/mp4")}
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "completed"
-

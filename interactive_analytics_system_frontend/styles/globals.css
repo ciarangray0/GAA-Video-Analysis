@@ -269,43 +269,120 @@ button.warning:hover {
   gap: 20px;
   margin-bottom: 20px;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: flex-start;
 }
 
-.frame-panel, .pitch-panel {
+.frame-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.pitch-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
+  flex-shrink: 0;
 }
 
-.frame-panel h4, .pitch-panel h4 {
+.frame-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.frame-panel-header h4 {
+  margin: 0;
+  color: #333;
+}
+
+.pitch-panel h4 {
   margin-bottom: 10px;
   color: #333;
 }
 
+/* Scrollable container for the frame canvas.
+   When zoomed, the canvas overflows here and the user can scroll to pan.
+   Outline on the canvas (not border) means getBoundingClientRect() gives
+   the exact pixel-for-pixel content area for correct click mapping. */
+.frame-canvas-scroller {
+  overflow: auto;
+  max-height: 70vh;
+  width: 100%;
+  background-color: #111;
+  border-radius: 2px;
+  position: relative;
+}
+
+/* Zoom controls */
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.zoom-btn {
+  padding: 3px 8px;
+  font-size: 12px;
+  background-color: #e0e0e0;
+  color: #333;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  cursor: pointer;
+  margin: 0;
+  min-width: unset;
+  transition: background-color 0.15s;
+}
+
+.zoom-btn:hover {
+  background-color: #ccc;
+}
+
+.zoom-btn.active {
+  background-color: #0070f3;
+  color: white;
+  border-color: #0051cc;
+}
+
+/* Live pixel-coordinate readout while hovering the frame canvas */
+.pixel-readout {
+  font-family: monospace;
+  font-size: 11px;
+  color: #666;
+  background: #f0f0f0;
+  padding: 2px 6px;
+  border-radius: 3px;
+  min-width: 120px;
+  white-space: nowrap;
+}
+
 .frame-canvas {
-  border: 2px solid #333;
+  /* outline instead of border: getBoundingClientRect() excludes outline,
+     so click coordinates map exactly to canvas content pixels. */
+  outline: 2px solid #444;
   cursor: crosshair;
-  max-width: 900px;
-  min-width: 400px;
-  min-height: 300px;
+  display: block;
   background-color: #1a1a1a;
 }
 
 .frame-canvas.has-pending {
-  border-color: #4caf50;
+  outline-color: #4caf50;
   box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
 }
 
 .pitch-diagram {
-  border: 2px solid #333;
+  outline: 2px solid #333;
   cursor: pointer;
   border-radius: 4px;
+  display: block;
 }
 
 .pitch-diagram.awaiting-click {
-  border-color: #ff9800;
+  outline-color: #ff9800;
   box-shadow: 0 0 15px rgba(255, 152, 0, 0.6);
   animation: pulse 1s infinite;
 }
@@ -1135,11 +1212,11 @@ button.warning:hover {
 
 /* Frame canvas in line mode */
 .frame-canvas.line-mode {
-  border-color: #00bcd4;
+  outline-color: #00bcd4;
 }
 
 .frame-canvas.line-mode.has-pending {
-  border-color: #ffeb3b;
+  outline-color: #ffeb3b;
   box-shadow: 0 0 15px rgba(255, 235, 59, 0.6);
 }
 

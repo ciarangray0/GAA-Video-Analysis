@@ -13,6 +13,62 @@ interface AnchorFrameAnnotatorProps {
   onCurrentIdxChange: (idx: number) => void
 }
 
+/** Draw a precision crosshair marker (2px circle + crosshair arms) at canvas coords (cx, cy). */
+function drawCrosshair(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  color: string,
+  label?: string,
+) {
+  const r = 2
+  const arm = 7
+
+  // Dark shadow for contrast on any background
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0,0,0,0.65)'
+  ctx.lineWidth = 2.5
+  ctx.beginPath()
+  ctx.moveTo(cx - r - arm, cy); ctx.lineTo(cx - r, cy)
+  ctx.moveTo(cx + r, cy);       ctx.lineTo(cx + r + arm, cy)
+  ctx.moveTo(cx, cy - r - arm); ctx.lineTo(cx, cy - r)
+  ctx.moveTo(cx, cy + r);       ctx.lineTo(cx, cy + r + arm)
+  ctx.stroke()
+
+  // Coloured arms
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.2
+  ctx.beginPath()
+  ctx.moveTo(cx - r - arm, cy); ctx.lineTo(cx - r, cy)
+  ctx.moveTo(cx + r, cy);       ctx.lineTo(cx + r + arm, cy)
+  ctx.moveTo(cx, cy - r - arm); ctx.lineTo(cx, cy - r)
+  ctx.moveTo(cx, cy + r);       ctx.lineTo(cx, cy + r + arm)
+  ctx.stroke()
+
+  // Centre circle
+  ctx.fillStyle = color
+  ctx.strokeStyle = 'rgba(0,0,0,0.65)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.arc(cx, cy, r, 0, 2 * Math.PI)
+  ctx.fill()
+  ctx.stroke()
+
+  if (label) {
+    const pad = 2
+    ctx.font = '7px monospace'
+    const tw = ctx.measureText(label).width
+    const lx = cx + r + arm + 3
+    const ly = cy + 2
+    ctx.fillStyle = 'rgba(0,0,0,0.30)'
+    ctx.fillRect(lx - pad, ly - 8, tw + pad * 2, 10)
+    ctx.fillStyle = 'rgba(255,255,255,0.70)'
+    ctx.textAlign = 'left'
+    ctx.fillText(label, lx, ly)
+  }
+  ctx.restore()
+}
+
 export default function AnchorFrameAnnotator({
   videoMetadata,
   videoFilename,
@@ -27,42 +83,47 @@ export default function AnchorFrameAnnotator({
   const [pendingLinePoint1, setPendingLinePoint1] = useState<{ x: number; y: number } | null>(null)
   const [pendingFrameClick, setPendingFrameClick] = useState<{ x: number; y: number } | null>(null)
   const [copyStatus, setCopyStatus] = useState('')
+  const [zoom, setZoom] = useState(1)
+  const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 })
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null)
 
   const frameCanvasRef = useRef<HTMLCanvasElement>(null)
   const frameImageRef = useRef<HTMLImageElement | null>(null)
   const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
   const importAnnotationsRef = useRef<HTMLInputElement>(null)
+  // Tracks which frame index the most recent loadFrameImage call is for,
+  // preventing a slower earlier load from overwriting a newer one.
+  const loadingFrameIdxRef = useRef<number | null>(null)
 
   const currentAnchor = anchorFrames[currentAnchorIdx]
 
-  // Auto-save to localStorage when anchorFrames change
+  // Auto-save to localStorage
   useEffect(() => {
     if (anchorFrames.length > 0 && videoFilename) {
       localStorage.setItem(`gaa_annotations_${videoFilename}`, JSON.stringify(anchorFrames))
     }
   }, [anchorFrames, videoFilename])
 
-  const loadFrameImage = useCallback(async (frameIdx: number) => {
+  const loadFrameImage = useCallback((frameIdx: number) => {
+    loadingFrameIdxRef.current = frameIdx
     setLoadingFrame(true)
-    try {
-      const url = `${API_URL}/videos/${videoMetadata.video_id}/frame/${frameIdx}`
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
+    const url = `${API_URL}/videos/${videoMetadata.video_id}/frame/${frameIdx}`
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      // Discard stale loads so the wrong image never shows with wrong annotations
+      if (loadingFrameIdxRef.current === frameIdx) {
         frameImageRef.current = img
         setLoadingFrame(false)
       }
-      img.onerror = () => {
-        setLoadingFrame(false)
-      }
-      img.src = `${url}?t=${Date.now()}`
-    } catch {
-      setLoadingFrame(false)
     }
+    img.onerror = () => {
+      if (loadingFrameIdxRef.current === frameIdx) setLoadingFrame(false)
+    }
+    img.src = `${url}?t=${Date.now()}`
   }, [videoMetadata.video_id])
 
   const hasLoadedRef = useRef(false)
-  // Load first frame once when the annotator first receives anchor frames
   useEffect(() => {
     if (!hasLoadedRef.current && anchorFrames.length > 0) {
       hasLoadedRef.current = true
@@ -79,139 +140,116 @@ export default function AnchorFrameAnnotator({
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    const maxWidth = 1000
-    const scale = Math.min(1, maxWidth / img.naturalWidth)
-    canvas.width = img.naturalWidth * scale
-    canvas.height = img.naturalHeight * scale
+    // Use up to 1600px buffer for better precision (was 1000)
+    const scale = Math.min(1, 1600 / img.naturalWidth)
+    const newW = Math.round(img.naturalWidth * scale)
+    const newH = Math.round(img.naturalHeight * scale)
+    if (canvas.width !== newW || canvas.height !== newH) {
+      canvas.width = newW
+      canvas.height = newH
+      setCanvasDims({ w: newW, h: newH })
+    }
+
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
     const anchor = anchorFrames[currentAnchorIdx]
-    const imgScale = canvas.width / img.naturalWidth
+    // Separate X and Y scales to correctly handle frames whose height rounds differently from width
+    const imgScaleX = canvas.width / img.naturalWidth
+    const imgScaleY = canvas.height / img.naturalHeight
 
     // Draw line annotations
-    if (anchor && anchor.lines) {
-      anchor.lines.forEach((line) => {
-        const x1 = line.u1 * imgScale
-        const y1 = line.v1 * imgScale
-        const x2 = line.u2 * imgScale
-        const y2 = line.v2 * imgScale
+    if (anchor?.lines) {
+      for (const line of anchor.lines) {
+        const x1 = line.u1 * imgScaleX
+        const y1 = line.v1 * imgScaleY
+        const x2 = line.u2 * imgScaleX
+        const y2 = line.v2 * imgScaleY
 
-        ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)'
-        ctx.lineWidth = 1.5
-        ctx.setLineDash([6, 4])
+        const isVertical = AVAILABLE_LINES[line.line_id]?.orientation === 'vertical'
+        const lineColor = isVertical ? 'rgba(255, 165, 0, 0.7)' : 'rgba(0, 220, 255, 0.7)'
+        const crosshairColor = isVertical ? '#ffa500' : '#00dcff'
+
+        ctx.save()
+        ctx.strokeStyle = lineColor
+        ctx.lineWidth = 1
+        ctx.setLineDash([5, 4])
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.lineTo(x2, y2)
         ctx.stroke()
         ctx.setLineDash([])
+        ctx.restore()
 
-        ctx.fillStyle = 'rgba(0, 255, 255, 0.6)'
-        ctx.beginPath()
-        ctx.arc(x1, y1, 4, 0, 2 * Math.PI)
-        ctx.fill()
-        ctx.beginPath()
-        ctx.arc(x2, y2, 4, 0, 2 * Math.PI)
-        ctx.fill()
-
-        const midX = (x1 + x2) / 2
-        const midY = (y1 + y2) / 2
-        ctx.font = '9px Arial'
         const labelText = AVAILABLE_LINES[line.line_id]?.label || line.line_id
-        const textW = ctx.measureText(labelText).width
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)'
-        ctx.fillRect(midX - textW / 2 - 3, midY - 8, textW + 6, 14)
-        ctx.fillStyle = '#00ffff'
-        ctx.textAlign = 'center'
-        ctx.fillText(labelText, midX, midY + 3)
-        ctx.textAlign = 'left'
-      })
+        drawCrosshair(ctx, x1, y1, crosshairColor)
+        drawCrosshair(ctx, x2, y2, crosshairColor, labelText)
+      }
     }
 
-    // Draw pending line first point
+    // Pending line first-point indicator
     if (pendingLinePoint1) {
-      const x = pendingLinePoint1.x * imgScale
-      const y = pendingLinePoint1.y * imgScale
-      ctx.fillStyle = 'rgba(255, 255, 0, 0.7)'
-      ctx.beginPath()
-      ctx.arc(x, y, 6, 0, 2 * Math.PI)
-      ctx.fill()
-      ctx.strokeStyle = '#000000'
-      ctx.lineWidth = 1
-      ctx.stroke()
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
-      ctx.fillRect(x - 75, y + 12, 150, 20)
-      ctx.fillStyle = '#ffffff'
-      ctx.font = '10px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText('Click second point on line', x, y + 26)
-      ctx.textAlign = 'left'
+      const px = pendingLinePoint1.x * imgScaleX
+      const py = pendingLinePoint1.y * imgScaleY
+      drawCrosshair(ctx, px, py, '#ffff00', '←2nd point')
     }
 
-    // Draw annotation points
-    if (anchor && anchor.points) {
-      anchor.points.forEach((point) => {
-        const x = point.x_img * imgScale
-        const y = point.y_img * imgScale
-        ctx.fillStyle = 'rgba(0, 255, 0, 0.6)'
-        ctx.beginPath()
-        ctx.arc(x, y, 5, 0, 2 * Math.PI)
-        ctx.fill()
-        ctx.strokeStyle = '#ffffff'
-        ctx.lineWidth = 1
-        ctx.stroke()
-        ctx.font = '10px Arial'
-        const labelText = point.pitch_id
-        const textW = ctx.measureText(labelText).width
-        const lx = x + 14
-        const ly = y + 4
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'
-        ctx.fillRect(lx - 2, ly - 10, textW + 4, 13)
-        ctx.fillStyle = '#ffffff'
-        ctx.fillText(labelText, lx, ly)
-      })
+    // Annotated keypoints
+    if (anchor?.points) {
+      for (const point of anchor.points) {
+        const px = point.x_img * imgScaleX
+        const py = point.y_img * imgScaleY
+        drawCrosshair(ctx, px, py, '#00ff80', point.pitch_id)
+      }
     }
   }, [anchorFrames, currentAnchorIdx, pendingLinePoint1])
 
-  // Redraw when annotations or image loads
   useEffect(() => {
     if (!loadingFrame && frameImageRef.current && anchorFrames.length > 0) {
       drawFrameWithPoints()
     }
   }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame, pendingLinePoint1])
 
-  // Redraw pitch diagram
   useEffect(() => {
     if (anchorFrames.length > 0 && pitchDiagramRef.current) {
       drawPitchDiagram(pitchDiagramRef.current, anchorFrames, currentAnchorIdx, pendingFrameClick, pendingLinePoint1)
     }
   }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pendingLinePoint1])
 
-  const handleFrameClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  /** Map a mouse event on the frame canvas to original image pixel coordinates.
+   *
+   * Key: we use outline (not border) on .frame-canvas so getBoundingClientRect()
+   * returns the exact content area. rect.width already accounts for any CSS zoom
+   * applied via style.width, so the formula is simply:
+   *   x_image = (clientX - rect.left) * img.naturalWidth / rect.width
+   */
+  const canvasEventToImageCoords = (
+    e: React.MouseEvent<HTMLCanvasElement>,
+  ): { x: number; y: number } | null => {
     const canvas = frameCanvasRef.current
     const img = frameImageRef.current
-    if (!canvas || !img || anchorFrames.length === 0) return
-    if (!img.naturalWidth || !img.naturalHeight) return
-
+    if (!canvas || !img || !img.naturalWidth) return null
     const rect = canvas.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const clickY = e.clientY - rect.top
-    const cssToCanvasX = canvas.width / rect.width
-    const cssToCanvasY = canvas.height / rect.height
-    const canvasToImageX = img.naturalWidth / canvas.width
-    const canvasToImageY = img.naturalHeight / canvas.height
-    const x = clickX * cssToCanvasX * canvasToImageX
-    const y = clickY * cssToCanvasY * canvasToImageY
+    const x = (e.clientX - rect.left) * img.naturalWidth / rect.width
+    const y = (e.clientY - rect.top) * img.naturalHeight / rect.height
+    return { x: Math.round(x), y: Math.round(y) }
+  }
+
+  const handleFrameClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (anchorFrames.length === 0) return
+    const coords = canvasEventToImageCoords(e)
+    if (!coords) return
+    const { x, y } = coords
 
     if (annotationMode === 'line') {
       if (!pendingLinePoint1) {
-        setPendingLinePoint1({ x: Math.round(x), y: Math.round(y) })
+        setPendingLinePoint1({ x, y })
       } else {
         const newLine: LineAnnotation = {
           line_id: selectedLineId,
           u1: pendingLinePoint1.x,
           v1: pendingLinePoint1.y,
-          u2: Math.round(x),
-          v2: Math.round(y),
+          u2: x,
+          v2: y,
         }
         const updated = [...anchorFrames]
         updated[currentAnchorIdx] = {
@@ -225,9 +263,16 @@ export default function AnchorFrameAnnotator({
         setPendingLinePoint1(null)
       }
     } else {
-      setPendingFrameClick({ x: Math.round(x), y: Math.round(y) })
+      setPendingFrameClick({ x, y })
     }
   }
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const coords = canvasEventToImageCoords(e)
+    if (coords) setHoverPos(coords)
+  }
+
+  const handleMouseLeave = () => setHoverPos(null)
 
   const handlePitchDiagramClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!pendingFrameClick) return
@@ -235,17 +280,15 @@ export default function AnchorFrameAnnotator({
     if (!canvas) return
 
     const rect = canvas.getBoundingClientRect()
-    const cssToCanvasX = canvas.width / rect.width
-    const cssToCanvasY = canvas.height / rect.height
-    const clickX = (e.clientX - rect.left) * cssToCanvasX
-    const clickY = (e.clientY - rect.top) * cssToCanvasY
+    const clickX = (e.clientX - rect.left) * canvas.width / rect.width
+    const clickY = (e.clientY - rect.top) * canvas.height / rect.height
 
     // Find closest pitch vertex within 20px
     let closestId: string | null = null
     let closestDist = Infinity
     for (const [id, coords] of Object.entries(GAA_PITCH_VERTICES)) {
       const pos = pitchToCanvas(coords[0], coords[1])
-      const dist = Math.sqrt(Math.pow(pos.x - clickX, 2) + Math.pow(pos.y - clickY, 2))
+      const dist = Math.hypot(pos.x - clickX, pos.y - clickY)
       if (dist < closestDist && dist < 20) {
         closestDist = dist
         closestId = id
@@ -253,21 +296,7 @@ export default function AnchorFrameAnnotator({
     }
 
     if (closestId) {
-      const newPoint: PitchPoint = {
-        pitch_id: closestId,
-        x_img: pendingFrameClick.x,
-        y_img: pendingFrameClick.y,
-      }
-      const updated = [...anchorFrames]
-      updated[currentAnchorIdx] = {
-        ...updated[currentAnchorIdx],
-        points: [
-          ...updated[currentAnchorIdx].points.filter(p => p.pitch_id !== closestId),
-          newPoint,
-        ],
-      }
-      onAnchorFramesChange(updated)
-      setPendingFrameClick(null)
+      addKeypoint(closestId)
       return
     }
 
@@ -284,7 +313,7 @@ export default function AnchorFrameAnnotator({
       const t = lenSq > 0 ? Math.max(0, Math.min(1, ((clickX - p1.x) * dx + (clickY - p1.y) * dy) / lenSq)) : 0
       const projX = p1.x + t * dx
       const projY = p1.y + t * dy
-      const dist = Math.sqrt(Math.pow(projX - clickX, 2) + Math.pow(projY - clickY, 2))
+      const dist = Math.hypot(projX - clickX, projY - clickY)
       if (dist < nearestLineDist && dist < 15) {
         nearestLineDist = dist
         nearestLine = seg
@@ -295,20 +324,27 @@ export default function AnchorFrameAnnotator({
     if (nearestLine) {
       const pitchX = nearestLine.x1 + lineT * (nearestLine.x2 - nearestLine.x1)
       const pitchY = nearestLine.y1 + lineT * (nearestLine.y2 - nearestLine.y1)
-      const pitchId = `line_${nearestLine.name}_x${pitchX.toFixed(1)}_y${pitchY.toFixed(1)}`
-      const newPoint: PitchPoint = {
-        pitch_id: pitchId,
-        x_img: pendingFrameClick.x,
-        y_img: pendingFrameClick.y,
-      }
-      const updated = [...anchorFrames]
-      updated[currentAnchorIdx] = {
-        ...updated[currentAnchorIdx],
-        points: [...updated[currentAnchorIdx].points, newPoint],
-      }
-      onAnchorFramesChange(updated)
-      setPendingFrameClick(null)
+      addKeypoint(`line_${nearestLine.name}_x${pitchX.toFixed(1)}_y${pitchY.toFixed(1)}`)
     }
+  }
+
+  const addKeypoint = (pitchId: string) => {
+    if (!pendingFrameClick) return
+    const newPoint: PitchPoint = {
+      pitch_id: pitchId,
+      x_img: pendingFrameClick.x,
+      y_img: pendingFrameClick.y,
+    }
+    const updated = [...anchorFrames]
+    updated[currentAnchorIdx] = {
+      ...updated[currentAnchorIdx],
+      points: [
+        ...updated[currentAnchorIdx].points.filter(p => p.pitch_id !== pitchId),
+        newPoint,
+      ],
+    }
+    onAnchorFramesChange(updated)
+    setPendingFrameClick(null)
   }
 
   const goToAnchorFrame = (idx: number) => {
@@ -471,6 +507,14 @@ export default function AnchorFrameAnnotator({
     }
   }
 
+  // Canvas CSS size driven by zoom (no border on canvas — use outline so
+  // getBoundingClientRect returns the exact content box)
+  const canvasStyle: React.CSSProperties = canvasDims.w > 0 ? {
+    width: `${canvasDims.w * zoom}px`,
+    height: `${canvasDims.h * zoom}px`,
+    imageRendering: zoom >= 2 ? 'pixelated' : 'auto',
+  } : {}
+
   return (
     <div className="annotation-section">
       <h2>3. Annotate Anchor Frames</h2>
@@ -531,9 +575,7 @@ export default function AnchorFrameAnnotator({
               Copy Next →
             </button>
           </div>
-          {copyStatus && (
-            <span style={{ marginLeft: 8, fontSize: 12, color: '#44ff44' }}>{copyStatus}</span>
-          )}
+          {copyStatus && <span style={{ marginLeft: 8, fontSize: 12, color: '#44ff44' }}>{copyStatus}</span>}
         </div>
       )}
 
@@ -563,7 +605,7 @@ export default function AnchorFrameAnnotator({
                 <select value={selectedLineId} onChange={(e) => setSelectedLineId(e.target.value)}>
                   {Object.entries(AVAILABLE_LINES).map(([id, info]) => (
                     <option key={id} value={id}>
-                      {info.label} (Y={info.y_meters}m)
+                      {info.label} {info.orientation === 'vertical' ? `(X=${info.x_meters}m)` : `(Y=${info.y_meters}m)`}
                     </option>
                   ))}
                 </select>
@@ -576,7 +618,7 @@ export default function AnchorFrameAnnotator({
             {annotationMode === 'line' ? (
               pendingLinePoint1 ? (
                 <p className="pending-instruction line-mode">
-                  ✓ First point selected at ({pendingLinePoint1.x}, {pendingLinePoint1.y}).
+                  ✓ First point: ({pendingLinePoint1.x}, {pendingLinePoint1.y}).
                   <strong> Click the second point on the {AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}.</strong>
                   <button onClick={() => setPendingLinePoint1(null)} className="cancel-btn">Cancel</button>
                 </p>
@@ -589,30 +631,53 @@ export default function AnchorFrameAnnotator({
               )
             ) : pendingFrameClick ? (
               <p className="pending-instruction">
-                ✓ Frame point selected at ({pendingFrameClick.x}, {pendingFrameClick.y}).
+                ✓ Frame point: ({pendingFrameClick.x}, {pendingFrameClick.y}).
                 <strong> Now click the corresponding point on the pitch diagram →</strong>
                 <button onClick={() => setPendingFrameClick(null)} className="cancel-btn">Cancel</button>
               </p>
             ) : (
-              <p>📍 <strong>Point Mode:</strong> Click a point on the video frame, then select the corresponding pitch location on the diagram.</p>
+              <p>📍 <strong>Point Mode:</strong> Click a feature in the video frame, then select the matching location on the pitch diagram.</p>
             )}
           </div>
 
-          {/* Side-by-side frame and pitch diagram */}
+          {/* Side-by-side workspace */}
           <div className="annotation-workspace">
             <div className="frame-panel">
-              <h4>Video Frame</h4>
+              <div className="frame-panel-header">
+                <h4>Video Frame</h4>
+                {/* Zoom controls */}
+                <div className="zoom-controls">
+                  {[1, 1.5, 2, 3, 4].map(z => (
+                    <button
+                      key={z}
+                      className={`zoom-btn ${zoom === z ? 'active' : ''}`}
+                      onClick={() => setZoom(z)}
+                    >
+                      {z}×
+                    </button>
+                  ))}
+                  <span className="pixel-readout">
+                    {hoverPos ? `px (${hoverPos.x}, ${hoverPos.y})` : 'hover to inspect'}
+                  </span>
+                </div>
+              </div>
+
               {loadingFrame ? (
                 <div className="loading">
                   <div className="spinner"></div>
                   <p>Loading frame...</p>
                 </div>
               ) : (
-                <canvas
-                  ref={frameCanvasRef}
-                  onClick={handleFrameClick}
-                  className={`frame-canvas ${annotationMode === 'line' ? 'line-mode' : ''} ${pendingFrameClick || pendingLinePoint1 ? 'has-pending' : ''}`}
-                />
+                <div className="frame-canvas-scroller">
+                  <canvas
+                    ref={frameCanvasRef}
+                    onClick={handleFrameClick}
+                    onMouseMove={handleMouseMove}
+                    onMouseLeave={handleMouseLeave}
+                    style={canvasStyle}
+                    className={`frame-canvas ${annotationMode === 'line' ? 'line-mode' : ''} ${pendingFrameClick || pendingLinePoint1 ? 'has-pending' : ''}`}
+                  />
+                </div>
               )}
             </div>
 
@@ -646,7 +711,7 @@ export default function AnchorFrameAnnotator({
                           {isLinePoint && <em style={{ fontWeight: 'normal', fontSize: '0.85em' }}> (line)</em>}
                         </strong>
                         <br />
-                        <small>Frame: ({point.x_img}, {point.y_img})</small>
+                        <small>({point.x_img}, {point.y_img})</small>
                       </span>
                       <button onClick={() => removePoint(idx)} className="remove-btn">×</button>
                     </div>
@@ -679,7 +744,7 @@ export default function AnchorFrameAnnotator({
         </>
       )}
 
-      {/* Navigation buttons */}
+      {/* Navigation */}
       <div className="nav-buttons">
         <button onClick={() => goToAnchorFrame(currentAnchorIdx - 1)} disabled={currentAnchorIdx === 0}>
           ← Previous Frame
@@ -689,7 +754,7 @@ export default function AnchorFrameAnnotator({
         </button>
       </div>
 
-      {/* Annotation summary and import/export */}
+      {/* Summary + Import/Export */}
       <div className="process-section">
         <div className="annotation-summary">
           <p>
