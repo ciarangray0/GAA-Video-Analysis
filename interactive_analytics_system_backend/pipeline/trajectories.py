@@ -133,17 +133,17 @@ def interpolate_trajectories(
         known_frame_set = set(int(f) for f in known_frames)
         for i, frame_idx in enumerate(frames_track):
             fi = int(frame_idx)
-            if fi in known_frame_set:
-                original = next(p for p in positions_sorted if p.frame_idx == fi)
-                all_positions.append(original)
-            else:
-                all_positions.append(PlayerPitchPosition(
-                    frame_idx=fi,
-                    track_id=track_id,
-                    x_pitch=float(xs[i]),
-                    y_pitch=float(ys[i]),
-                    source="interpolated",
-                ))
+            # Use smoothed coordinates for all frames (detected and interpolated).
+            # Previously, detected frames were written back as raw originals, which
+            # meant SG smoothing had no effect on them — the main source of jitter.
+            source = "homography" if fi in known_frame_set else "interpolated"
+            all_positions.append(PlayerPitchPosition(
+                frame_idx=fi,
+                track_id=track_id,
+                x_pitch=float(xs[i]),
+                y_pitch=float(ys[i]),
+                source=source,
+            ))
 
     all_positions.sort(key=lambda p: (p.frame_idx, p.track_id))
     return all_positions
