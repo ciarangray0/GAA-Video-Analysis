@@ -17,34 +17,6 @@ def test_upload_video_and_track(client, sample_video_metadata, monkeypatch, samp
     assert body2["tracks"] >= 1
 
 
-def test_homographies_v2_with_lines(client, sample_video_metadata, sample_anchor_frame_annotations):
-    """Test the v2 homography endpoint with line constraints."""
-    fake_file = BytesIO(b"fake mp4 data")
-    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
-    assert r.status_code == 200
-    vid = r.json()["video_id"]
-
-    payload = [a.model_dump() for a in sample_anchor_frame_annotations]
-    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
-    assert resp.status_code == 200
-    result = resp.json()
-    assert "frames" in result
-    assert 0 in result["frames"]
-    assert "info" in result
-
-
-def test_homographies_v2_without_lines(client, sample_video_metadata, sample_anchor_frame_annotations_no_lines):
-    """Test the v2 endpoint works without line constraints."""
-    fake_file = BytesIO(b"fake mp4 data")
-    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
-    vid = r.json()["video_id"]
-
-    payload = [a.model_dump() for a in sample_anchor_frame_annotations_no_lines]
-    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
-    assert resp.status_code == 200
-    assert 0 in resp.json()["frames"]
-
-
 def test_get_available_lines(client):
     """Test the endpoint that returns available line IDs."""
     resp = client.get("/line-constraints/available-lines")
@@ -53,20 +25,6 @@ def test_get_available_lines(client):
     assert "lines" in result
     assert "20m_top" in result["lines"]
     assert "halfway" in result["lines"]
-
-
-def test_homographies_v2_bad_annotations(client, sample_video_metadata):
-    """Test that v2 endpoint returns 400 when fewer than 4 keypoints are provided."""
-    fake_file = BytesIO(b"fake mp4 data")
-    r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
-    vid = r.json()["video_id"]
-
-    payload = [{"frame_idx": 0, "points": [
-        {"pitch_id": "corner_tl", "x_img": 0, "y_img": 0},
-        {"pitch_id": "corner_tr", "x_img": 400, "y_img": 0},
-    ], "lines": []}]
-    resp = client.post(f"/videos/{vid}/homographies/v2", json=payload)
-    assert resp.status_code == 400
 
 
 def test_map_players_and_interpolate_full_flow(
@@ -81,18 +39,10 @@ def test_map_players_and_interpolate_full_flow(
 
     client.post(f"/videos/{vid}/track")
 
-    # Patch v2 pipeline functions
-    monkeypatch.setattr(
-        "pipeline.homography.compute_homographies_with_lines",
-        lambda ann, **kw: (sample_homography, {0: {"valid_lines": 0}}),
-    )
-    monkeypatch.setattr(
-        "pipeline.constrained_homography.build_constrained_per_frame_H",
-        lambda path, anchors, **kw: (sample_homography, {}),
-    )
-
-    payload = [a.model_dump() for a in sample_anchor_frame_annotations]
-    client.post(f"/videos/{vid}/homographies/v2", json=payload)
+    # Inject v3 homographies directly into the store
+    from store import store
+    store.v3_per_frame_H_cache[vid] = sample_homography
+    store.v3_anchor_H_cache[vid] = sample_homography
 
     resp = client.post(f"/videos/{vid}/map_players")
     assert resp.status_code == 200
@@ -100,7 +50,7 @@ def test_map_players_and_interpolate_full_flow(
 
     monkeypatch.setattr(
         "pipeline.trajectories.interpolate_trajectories",
-        lambda positions, start, end: [],
+        lambda positions, start, end, **kw: [],
     )
     resp2 = client.post(f"/videos/{vid}/interpolate?start_frame=0&end_frame=5")
     assert resp2.status_code == 200

@@ -1,6 +1,6 @@
 """Pydantic schemas for API requests and responses."""
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 
 class PitchPoint(BaseModel):
@@ -102,18 +102,3 @@ class InterpolationResponse(BaseModel):
     method: str
 
 
-class ProcessVideoResponse(BaseModel):
-    """Response from unified /process-video endpoint."""
-    video_id: str
-    status: str  # "processing" or "completed"
-    player_positions: Optional[List[PlayerPitchPosition]] = None
-    homography_frames: Optional[List[int]] = None  # Frames where homographies were computed
-    start_frame: Optional[int] = None  # First frame processed
-    end_frame: Optional[int] = None  # Last frame processed
-    fps: Optional[float] = None  # Video FPS for playback
-
-
-class HomographyWithLinesResponse(BaseModel):
-    """Response for line-constrained homography computation."""
-    frames: List[int]
-    info: Dict[str, dict] = {}  # Frame index (as string) -> computation info
