@@ -24,12 +24,15 @@ _DEFAULT_SG_LONG_WIN = 15   # tracks > 20 frames
 _DEFAULT_SG_MID_WIN  = 11   # tracks 10-20 frames
 # tracks < 10 frames: no smoothing
 
+_SG_LONG_TRACK_MIN = 20   # tracks longer than this use the long SG window
+_SG_MID_TRACK_MIN  = 10   # tracks at least this long use the mid SG window
+
 
 def _sg_window(n_frames: int, long_win: int, mid_win: int) -> Optional[int]:
     """Return the SG window to use for a track of n_frames length, or None."""
-    if n_frames > 20:
+    if n_frames > _SG_LONG_TRACK_MIN:
         win = min(long_win, n_frames)
-    elif n_frames >= 10:
+    elif n_frames >= _SG_MID_TRACK_MIN:
         win = min(mid_win, n_frames)
     else:
         return None
@@ -62,8 +65,6 @@ def interpolate_trajectories(
     sg_mid_window: int = _DEFAULT_SG_MID_WIN,
     sg_polyorder: int = 2,
     max_vel_px: float = _DEFAULT_MAX_VEL_PX,
-    # Legacy parameter — ignored; kept so old call-sites don't break
-    legacy_window: int = 7,
 ) -> List[PlayerPitchPosition]:
     """Interpolate and smooth player trajectories.
 
@@ -76,7 +77,6 @@ def interpolate_trajectories(
         sg_polyorder:     Savitzky-Golay polynomial order (default 2).
         max_vel_px:       Max allowed displacement per frame in pitch-canvas
                           pixels (default 4 = 10 m/s at 10 px/m, 25 fps).
-        legacy_window:    Unused — present for backwards compatibility only.
 
     Returns:
         Dense list of PlayerPitchPosition for every frame within each track's
@@ -130,20 +130,21 @@ def interpolate_trajectories(
             xs = np.clip(xs, 0, OUT_W)
             ys = np.clip(ys, 0, OUT_H)
 
-        known_frame_set = set(int(f) for f in known_frames)
+        # Preserve original source labels for detected frames
+        known_source = {int(p.frame_idx): p.source for p in positions_sorted}
         for i, frame_idx in enumerate(frames_track):
             fi = int(frame_idx)
-            if fi in known_frame_set:
-                original = next(p for p in positions_sorted if p.frame_idx == fi)
-                all_positions.append(original)
-            else:
-                all_positions.append(PlayerPitchPosition(
-                    frame_idx=fi,
-                    track_id=track_id,
-                    x_pitch=float(xs[i]),
-                    y_pitch=float(ys[i]),
-                    source="interpolated",
-                ))
+            # Use smoothed coordinates for all frames (detected and interpolated).
+            # Previously, detected frames were written back as raw originals, which
+            # meant SG smoothing had no effect on them — the main source of jitter.
+            source = known_source.get(fi, "interpolated")
+            all_positions.append(PlayerPitchPosition(
+                frame_idx=fi,
+                track_id=track_id,
+                x_pitch=float(xs[i]),
+                y_pitch=float(ys[i]),
+                source=source,
+            ))
 
     all_positions.sort(key=lambda p: (p.frame_idx, p.track_id))
     return all_positions

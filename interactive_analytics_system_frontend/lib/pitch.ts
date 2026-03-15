@@ -177,20 +177,28 @@ export function drawPitch(
   ctx.lineWidth = 2
   ctx.strokeRect(2, 2, W - 4, H - 4)
 
-  // Center line and circle
+  // All pitch markings at uniform opacity
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)'
+  ctx.lineWidth = 1
+
+  // Center line
   ctx.beginPath()
   ctx.moveTo(0, H / 2)
   ctx.lineTo(W, H / 2)
   ctx.stroke()
 
+  // 20m semicircles (radius 13m, curving into pitch)
+  const arcR = (13 / GAA_PITCH_LENGTH) * H
+  const arcCx = W / 2
   ctx.beginPath()
-  ctx.arc(W / 2, H / 2, 40 * DISPLAY_SCALE, 0, 2 * Math.PI)
+  ctx.arc(arcCx, (20 / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, false)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(arcCx, (120 / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, true)
   ctx.stroke()
 
   // Symmetric horizontal line pairs (13m, 20m, 45m)
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
-  ctx.lineWidth = 1
-  for (const y_m of [13, 20, 45] as const) {
+  for (const y_m of [13, 20, 45, 65] as const) {
     drawHorizontalLinePair(
       ctx,
       (y_m / GAA_PITCH_LENGTH) * H,
@@ -199,7 +207,40 @@ export function drawPitch(
     )
   }
 
-  const framePositions = positions.filter(p => p.frame_idx === frame)
+  // 13m box vertical lines (x=33m, x=52m, from endline to 13m line)
+  const box13L = (33 / GAA_PITCH_WIDTH) * W
+  const box13R = (52 / GAA_PITCH_WIDTH) * W
+  const y13top = (13 / GAA_PITCH_LENGTH) * H
+  const y13bot = (127 / GAA_PITCH_LENGTH) * H
+  ctx.beginPath()
+  ctx.moveTo(box13L, 0);    ctx.lineTo(box13L, y13top)
+  ctx.moveTo(box13R, 0);    ctx.lineTo(box13R, y13top)
+  ctx.moveTo(box13L, y13bot); ctx.lineTo(box13L, H)
+  ctx.moveTo(box13R, y13bot); ctx.lineTo(box13R, H)
+  ctx.stroke()
+
+  // Small (goalie) box (x=35.5m–49.5m, depth=4.5m from endline)
+  const boxSL = (35.5 / GAA_PITCH_WIDTH) * W
+  const boxSR = (49.5 / GAA_PITCH_WIDTH) * W
+  const ySTop = (4.5 / GAA_PITCH_LENGTH) * H
+  const ySBot = (135.5 / GAA_PITCH_LENGTH) * H
+  ctx.beginPath()
+  ctx.moveTo(boxSL, 0);  ctx.lineTo(boxSL, ySTop); ctx.lineTo(boxSR, ySTop); ctx.lineTo(boxSR, 0)
+  ctx.moveTo(boxSL, H);  ctx.lineTo(boxSL, ySBot); ctx.lineTo(boxSR, ySBot); ctx.lineTo(boxSR, H)
+  ctx.stroke()
+
+  // Filter out tracks present for fewer than 30 frames (~1 second at ~30fps)
+  const MIN_TRACK_FRAMES = 30
+  const trackFrameCounts = new Map<number, number>()
+  for (const p of positions) {
+    trackFrameCounts.set(p.track_id, (trackFrameCounts.get(p.track_id) ?? 0) + 1)
+  }
+  const validTrackIds = new Set<number>()
+  trackFrameCounts.forEach((count, id) => {
+    if (count >= MIN_TRACK_FRAMES) validTrackIds.add(id)
+  })
+
+  const framePositions = positions.filter(p => p.frame_idx === frame && validTrackIds.has(p.track_id))
   const activeTrackIds = new Set(framePositions.map(p => p.track_id))
 
   const outOfBounds = framePositions.filter(
@@ -213,7 +254,7 @@ export function drawPitch(
 
   // For each track that has been seen at some point up to this frame but is
   // not active now, find its most recent position and draw a grey ghost dot.
-  const pastPositions = positions.filter(p => p.frame_idx < frame)
+  const pastPositions = positions.filter(p => p.frame_idx < frame && validTrackIds.has(p.track_id))
   const lastKnownByTrack = new Map<number, PlayerPosition>()
   for (const p of pastPositions) {
     const existing = lastKnownByTrack.get(p.track_id)

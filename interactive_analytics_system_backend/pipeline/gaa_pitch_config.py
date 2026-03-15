@@ -69,8 +69,29 @@ GAA_PITCH_VERTICES = {
     "center_right": (85.0, 70.0),
 }
 
-# GAA pitch sideline X-values in meters (vertical lines)
+# GAA pitch line Y-values in meters (horizontal lines crossing full pitch width)
+GAA_PITCH_LINES = {
+    "endline_top":            0.0,
+    "small_rectangle_top":    4.5,    # Goal area line
+    "13m_top":               13.0,
+    "20m_top":               20.0,
+    "45m_top":               45.0,
+    "65m_top":               65.0,
+    "halfway":               70.0,
+    "65m_bottom":            75.0,
+    "45m_bottom":            95.0,
+    "20m_bottom":           120.0,
+    "13m_bottom":           127.0,
+    "small_rectangle_bottom": 135.5,
+    "endline_bottom":       140.0,
+}
+
+# GAA pitch sideline X-values in meters (vertical lines running full pitch length)
 GAA_PITCH_SIDELINES = {
-    "left_sideline": 0.0,    # x = 0m (left boundary)
-    "right_sideline": 85.0,  # x = 85m (right boundary, GAA_PITCH_WIDTH)
+    "left_sideline":   0.0,   # x = 0m (left boundary)
+    "right_sideline":  85.0,  # x = 85m (right boundary)
+    "13m_box_left":    33.0,  # x = 33m (left 13m box side)
+    "13m_box_right":   52.0,  # x = 52m (right 13m box side)
+    "small_arc_left":  29.5,  # x = 29.5m (left small arc side)
+    "small_arc_right": 55.5,  # x = 55.5m (right small arc side)
 }

@@ -8,29 +8,6 @@ interface StepBResult {
   info: Record<string, any>
 }
 
-interface PerFrameMappingFrame {
-  frame: number
-  y_pf: number
-  y_na: number
-  err_pf: number
-  err_na: number
-  improvement: number
-}
-
-interface PerFrameMappingSummary {
-  median_pf: number
-  mean_pf: number
-  max_pf: number
-  median_na: number
-  mean_na: number
-  max_na: number
-  pct_better: number
-}
-
-interface PerFrameMappingData {
-  frames: PerFrameMappingFrame[]
-  summary: PerFrameMappingSummary | null
-}
 
 interface AnchorQualityPoint {
   pitch_id: string
@@ -137,9 +114,6 @@ export default function PipelineSteps({
   onStatusChange,
   logApiCall,
 }: PipelineStepsProps) {
-  const [perFrameData, setPerFrameData] = useState<PerFrameMappingData | null>(null)
-  const [loadingDiagnostic, setLoadingDiagnostic] = useState(false)
-  const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
   const [anchorQuality, setAnchorQuality] = useState<AnchorQualityData | null>(null)
   const [anchorQualityError, setAnchorQualityError] = useState<string | null>(null)
   // Incremented each time step B completes, used to bust the browser image cache
@@ -148,6 +122,7 @@ export default function PipelineSteps({
   const [sgLongWindow, setSgLongWindow] = useState(15)
   const [sgMidWindow, setSgMidWindow] = useState(11)
   const [maxVelPx, setMaxVelPx] = useState(4.0)
+  // Step B distortion mode: 0=none, 1=after H, 2=integrated
 
   const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
     const method = options?.method || 'GET'
@@ -288,24 +263,6 @@ export default function PipelineSteps({
     }
   }, [videoMetadata, stepCResult, sgLongWindow, sgMidWindow, maxVelPx, onStepDComplete, onStepsClearedStale, onRunningStepChange, onError, onStatusChange])
 
-  const loadPerFrameDiagnostic = useCallback(async () => {
-    if (!videoMetadata) return
-    setLoadingDiagnostic(true)
-    setDiagnosticError(null)
-    try {
-      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/diagnostics/per-frame-mapping`)
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Diagnostic failed')
-      }
-      const data: PerFrameMappingData = await res.json()
-      setPerFrameData(data)
-    } catch (err: any) {
-      setDiagnosticError(err.message || 'Failed to load diagnostic')
-    } finally {
-      setLoadingDiagnostic(false)
-    }
-  }, [videoMetadata, apiFetch])
 
   // A frame is valid if it has any annotations (points or lines)
   const validAnnotationCount = useMemo(
@@ -448,85 +405,6 @@ export default function PipelineSteps({
               </details>
             )}
 
-            {/* Per-frame mapping diagnostic */}
-            <details className="step-details" style={{ marginTop: '10px' }}>
-              <summary>Per-Frame Mapping Diagnostic (20m_top accuracy)</summary>
-              <div style={{ marginTop: '8px' }}>
-                <p style={{ fontSize: '0.85em', color: '#555' }}>
-                  Measures per-frame H vs nearest-anchor H accuracy using annotated 20m_top line midpoints.
-                  Requires at least one anchor frame annotated with a 20m_top line.
-                </p>
-                <button
-                  onClick={loadPerFrameDiagnostic}
-                  disabled={loadingDiagnostic}
-                  className="process-btn"
-                  style={{ marginBottom: '8px' }}
-                >
-                  {loadingDiagnostic ? 'Loading…' : 'Load Diagnostic'}
-                </button>
-                {diagnosticError && <p style={{ color: 'red' }}>{diagnosticError}</p>}
-                {perFrameData && perFrameData.frames.length === 0 && (
-                  <p>No frames available — annotate at least one anchor frame with a 20m_top line.</p>
-                )}
-                {perFrameData?.summary && (
-                  <>
-                    <p><strong>Summary (20m_top line mapping error)</strong></p>
-                    <table className="debug-table">
-                      <thead>
-                        <tr><th></th><th>Median (px)</th><th>Mean (px)</th><th>Max (px)</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td>Per-frame H</td>
-                          <td>{perFrameData.summary.median_pf}</td>
-                          <td>{perFrameData.summary.mean_pf}</td>
-                          <td>{perFrameData.summary.max_pf}</td>
-                        </tr>
-                        <tr>
-                          <td>Nearest anchor H</td>
-                          <td>{perFrameData.summary.median_na}</td>
-                          <td>{perFrameData.summary.mean_na}</td>
-                          <td>{perFrameData.summary.max_na}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                    <p>Per-frame H better on <strong>{perFrameData.summary.pct_better}%</strong> of frames (by &gt;2px)</p>
-                  </>
-                )}
-                {perFrameData && perFrameData.frames.length > 0 && (
-                  <details style={{ marginTop: '8px' }}>
-                    <summary>Frame-by-frame data ({perFrameData.frames.length} frames)</summary>
-                    <table className="debug-table">
-                      <thead>
-                        <tr>
-                          <th>Frame</th>
-                          <th>PF y (px)</th>
-                          <th>NA y (px)</th>
-                          <th>PF err (px)</th>
-                          <th>NA err (px)</th>
-                          <th>Improvement (px)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {perFrameData.frames.map(r => (
-                          <tr key={r.frame}>
-                            <td>{r.frame}</td>
-                            <td>{r.y_pf}</td>
-                            <td>{r.y_na}</td>
-                            <td>{r.err_pf}</td>
-                            <td>{r.err_na}</td>
-                            <td style={{ color: r.improvement > 0 ? '#2d7a2d' : r.improvement < 0 ? '#cc2222' : undefined }}>
-                              {r.improvement > 0 ? '+' : ''}{r.improvement}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </details>
-                )}
-              </div>
-            </details>
-
             {/* Warped frame previews */}
             <div className="warped-thumbs">
               {stepBResult.frames.map(f => (
@@ -539,12 +417,12 @@ export default function PipelineSteps({
                     </div>
                     <div>
                       <p className="thumb-sublabel">Warped</p>
-                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?method=v3&v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
+                      <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?v=${stepBVersion}`} alt={`Warped frame ${f}`} className="thumb-img" />
                     </div>
                     {stepCResult && (
                       <div>
                         <p className="thumb-sublabel">With Players</p>
-                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped_with_players?method=v3&v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
+                        <img src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${f}/warped?players=true&v=${stepBVersion}`} alt={`Warped with players frame ${f}`} className="thumb-img" />
                       </div>
                     )}
                   </div>

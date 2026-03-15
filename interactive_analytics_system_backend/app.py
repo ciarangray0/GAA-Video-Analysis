@@ -15,8 +15,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-from pipeline.config import OUT_W, OUT_H, K1
-from pipeline.rendering import distorted_homography_warp
+from pipeline.config import OUT_W, OUT_H
+from pipeline.rendering import warp_frame
 from pipeline.schemas import (
     VideoCreateResponse,
     TrackResponse,
@@ -26,11 +26,8 @@ from pipeline.schemas import (
     AnchorFrameAnnotation,
 )
 # NOTE: `run_tracking` performs heavy ML imports; imported lazily inside endpoint.
-from pipeline.homography import compute_homographies_with_lines, resolve_pitch_coordinates
-from pipeline.constrained_homography import (
-    build_constrained_per_frame_H,
-    build_optical_flow_per_frame_H,
-)
+from pipeline.homography import resolve_pitch_coordinates
+from pipeline.constrained_homography import build_optical_flow_per_frame_H
 from pipeline.map_players import map_players_to_pitch
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
@@ -141,39 +138,12 @@ def load_detections(video_id: str) -> Optional[List[Detection]]:
     return [Detection(**d) for d in data] if data is not None else None
 
 
-def save_homographies(video_id: str, h_dict: Dict[int, np.ndarray]) -> None:
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_homographies.json", _serialize_H(h_dict))
+def _save_homography_dict(video_id: str, key: str, h_dict: Dict[int, np.ndarray]) -> None:
+    _save_json(ANNOTATIONS_DIR / f"{video_id}_{key}.json", _serialize_H(h_dict))
 
 
-def load_homographies(video_id: str) -> Optional[Dict[int, np.ndarray]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_homographies.json")
-    return _deserialize_H(data) if data is not None else None
-
-
-def save_anchor_homographies(video_id: str, h_dict: Dict[int, Any]) -> None:
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_anchor_homographies.json", _serialize_H(h_dict))
-
-
-def load_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_anchor_homographies.json")
-    return _deserialize_H(data) if data is not None else None
-
-
-def save_v3_anchor_homographies(video_id: str, h_dict: Dict[int, Any]) -> None:
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_v3_anchor_homographies.json", _serialize_H(h_dict))
-
-
-def load_v3_anchor_homographies(video_id: str) -> Optional[Dict[int, Any]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_v3_anchor_homographies.json")
-    return _deserialize_H(data) if data is not None else None
-
-
-def save_v3_homographies(video_id: str, h_dict: Dict[int, np.ndarray]) -> None:
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json", _serialize_H(h_dict))
-
-
-def load_v3_homographies(video_id: str) -> Optional[Dict[int, np.ndarray]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_v3_homographies.json")
+def _load_homography_dict(video_id: str, key: str) -> Optional[Dict[int, np.ndarray]]:
+    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_{key}.json")
     return _deserialize_H(data) if data is not None else None
 
 
@@ -201,36 +171,77 @@ def load_annotations(video_id: str) -> Optional[dict]:
     return {int(k): v for k, v in data.items()} if data is not None else None
 
 
-def _read_and_warp_frame(video_path: str, frame_idx: int, H: np.ndarray) -> Response:
-    """Extract a video frame, apply distorted homography warp, return JPEG Response."""
-    cap = cv2.VideoCapture(video_path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        raise HTTPException(status_code=500, detail="Failed to extract frame")
-    warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
-    _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+def _resolve_homography(video_id: str, frame_idx: int) -> Optional[np.ndarray]:
+    """Return the per-frame v3 homography for a frame (nearest if exact frame missing)."""
+    v3_hs = store.v3_per_frame_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_homographies")
+    if not v3_hs:
+        return None
+    if frame_idx in v3_hs:
+        return v3_hs[frame_idx]
+    return v3_hs[min(v3_hs.keys(), key=lambda f: abs(f - frame_idx))]
 
 
-def find_nearest_homography(video_id: str, frame_idx: int, method: str = "v2"):
-    """Return (H_matrix, anchor_frame_idx) for the nearest computed anchor frame.
+# Reference lines for warped frame overlays: (label, y_meters, bgr_colour)
+_REFERENCE_LINES = [
+    ("13m",     13.0, (0, 200, 255)),
+    ("20m",     20.0, (0, 255, 0)),
+    ("45m",     45.0, (255, 128, 0)),
+    ("65m",     65.0, (128, 0, 255)),
+    ("halfway", 70.0, (255, 255, 0)),
+    ("65m",     75.0, (128, 0, 255)),
+    ("45m",     95.0, (255, 128, 0)),
+    ("20m",    120.0, (0, 255, 0)),
+    ("13m",    127.0, (0, 200, 255)),
+]
 
-    Args:
-        video_id:  Video identifier.
-        frame_idx: Target frame index.
-        method:    ``"v2"`` (default) or ``"v3"`` — selects which per-frame
-                   homography set to use.
-    """
-    if method == "v3":
-        homographies = store.v3_homographies_cache.get(video_id) or load_v3_homographies(video_id)
-    else:
-        homographies = store.homographies_cache.get(video_id) or load_homographies(video_id)
-    if not homographies:
-        return None, None
-    nearest = min(homographies.keys(), key=lambda f: abs(f - frame_idx))
-    return homographies[nearest], nearest
+
+_LINE_ALPHA = 0.45  # overlay opacity for pitch reference lines
+
+
+def _draw_reference_lines(warped: np.ndarray) -> None:
+    """Draw pitch reference lines onto a warped canvas image (in-place, semi-transparent)."""
+    overlay = warped.copy()
+
+    # Horizontal reference lines (dashed)
+    for label, y_m, colour in _REFERENCE_LINES:
+        y_px = int(y_m / GAA_PITCH_LENGTH * OUT_H)
+        x, dash_len = 0, 20
+        while x < OUT_W:
+            cv2.line(overlay, (x, y_px), (min(x + dash_len, OUT_W), y_px), colour, 2)
+            x += dash_len * 2
+        cv2.putText(overlay, label, (4, y_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+
+    # 20m semicircles (radius 13m = 130px, curving into pitch)
+    arc_r = int(13 / GAA_PITCH_LENGTH * OUT_H)
+    arc_cx = OUT_W // 2
+    colour_20m = (0, 255, 0)
+    cv2.ellipse(overlay, (arc_cx, int(20 / GAA_PITCH_LENGTH * OUT_H)), (arc_r, arc_r), 0, 0, 180, colour_20m, 2)
+    cv2.ellipse(overlay, (arc_cx, int(120 / GAA_PITCH_LENGTH * OUT_H)), (arc_r, arc_r), 0, 180, 360, colour_20m, 2)
+
+    # 13m box vertical lines (x=33m, x=52m, from endline to 13m line)
+    box_colour = (255, 255, 255)
+    box13_lx = int(33 / GAA_PITCH_WIDTH * OUT_W)
+    box13_rx = int(52 / GAA_PITCH_WIDTH * OUT_W)
+    y13_top = int(13 / GAA_PITCH_LENGTH * OUT_H)
+    y13_bot = int(127 / GAA_PITCH_LENGTH * OUT_H)
+    cv2.line(overlay, (box13_lx, 0),      (box13_lx, y13_top), box_colour, 2)
+    cv2.line(overlay, (box13_rx, 0),      (box13_rx, y13_top), box_colour, 2)
+    cv2.line(overlay, (box13_lx, y13_bot), (box13_lx, OUT_H),  box_colour, 2)
+    cv2.line(overlay, (box13_rx, y13_bot), (box13_rx, OUT_H),  box_colour, 2)
+
+    # Small (goalie) box (x=35.5m–49.5m, depth=4.5m from each endline)
+    boxs_lx = int(35.5 / GAA_PITCH_WIDTH * OUT_W)
+    boxs_rx = int(49.5 / GAA_PITCH_WIDTH * OUT_W)
+    ys_top = int(4.5 / GAA_PITCH_LENGTH * OUT_H)
+    ys_bot = int(135.5 / GAA_PITCH_LENGTH * OUT_H)
+    cv2.line(overlay, (boxs_lx, 0),      (boxs_lx, ys_top),  box_colour, 2)
+    cv2.line(overlay, (boxs_lx, ys_top), (boxs_rx, ys_top),  box_colour, 2)
+    cv2.line(overlay, (boxs_rx, 0),      (boxs_rx, ys_top),  box_colour, 2)
+    cv2.line(overlay, (boxs_lx, OUT_H),  (boxs_lx, ys_bot),  box_colour, 2)
+    cv2.line(overlay, (boxs_lx, ys_bot), (boxs_rx, ys_bot),  box_colour, 2)
+    cv2.line(overlay, (boxs_rx, OUT_H),  (boxs_rx, ys_bot),  box_colour, 2)
+
+    cv2.addWeighted(overlay, _LINE_ALPHA, warped, 1 - _LINE_ALPHA, 0, warped)
 
 
 # --- Endpoints ---
@@ -296,69 +307,20 @@ async def get_frame(video_id: str, frame_idx: int):
         raise HTTPException(status_code=500, detail="Failed to extract frame")
 
 
-@app.get("/videos/{video_id}/warped-frame/{frame_idx}")
-async def get_warped_frame(video_id: str, frame_idx: int):
-    """Return a warped JPEG for an anchor frame using its computed homography."""
-    video_info = _get_video_or_404(video_id)
-
-    homographies = store.homographies_cache.get(video_id)
-    if not homographies:
-        raise HTTPException(status_code=400, detail="No homographies computed for this video")
-    if frame_idx not in homographies:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No homography for frame {frame_idx}. Available: {list(homographies.keys())}",
-        )
-
-    try:
-        return _read_and_warp_frame(video_info["path"], frame_idx, homographies[frame_idx])
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to create warped frame {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
-
-
 @app.get("/videos/{video_id}/frames/{frame_idx}/warped")
 async def get_warped_frame_any(
     video_id: str,
     frame_idx: int,
-    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
+    players: bool = Query(False, description="Overlay player positions on the warped frame"),
 ):
-    """Return a warped JPEG for any frame using the nearest anchor homography.
+    """Return a warped JPEG with pitch reference lines, and optionally player dots.
 
-    Use ``?method=v3`` to use the DLT-based v3 homographies instead of v2.
+    Always uses the best available homography (v3 per-frame if computed, else v2
+    nearest anchor). Add ``?players=true`` to overlay player positions.
     """
     video_info = _get_video_or_404(video_id)
 
-    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
-    if H is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No {method} homographies computed for this video"
-        )
-
-    try:
-        response = _read_and_warp_frame(video_info["path"], frame_idx, H)
-        response.headers["Cache-Control"] = "max-age=300"
-        return response
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed warped frame {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
-
-
-@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_players")
-async def get_warped_frame_with_players(
-    video_id: str,
-    frame_idx: int,
-    method: str = Query("v2", description="Homography method: 'v2' or 'v3'"),
-):
-    """Return a warped JPEG with player positions drawn as coloured circles."""
-    video_info = _get_video_or_404(video_id)
-
-    H, _ = find_nearest_homography(video_id, frame_idx, method=method)
+    H = _resolve_homography(video_id, frame_idx)
     if H is None:
         raise HTTPException(status_code=400, detail="No homographies computed for this video")
 
@@ -370,21 +332,24 @@ async def get_warped_frame_with_players(
         if not ret:
             raise HTTPException(status_code=500, detail="Failed to extract frame")
 
-        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
+        warped = warp_frame(frame, H, OUT_W, OUT_H)
+        _draw_reference_lines(warped)
 
-        for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
-            x, y = int(pos.x_pitch), int(pos.y_pitch)
-            if 0 <= x < OUT_W and 0 <= y < OUT_H:
-                color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
-                cv2.circle(warped, (x, y), 8, color, -1)
-                cv2.putText(warped, str(pos.track_id), (x + 10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if players:
+            for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
+                x, y = int(pos.x_pitch), int(pos.y_pitch)
+                if 0 <= x < OUT_W and 0 <= y < OUT_H:
+                    color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
+                    cv2.circle(warped, (x, y), 8, color, -1)
+                    cv2.putText(warped, str(pos.track_id), (x + 10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+        cache = "no-cache" if players else "max-age=300"
+        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": cache})
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed warped_with_players {frame_idx} for video {video_id}: {e}")
+        logger.error(f"Failed warped frame {frame_idx} for video {video_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
 
 
@@ -397,6 +362,46 @@ async def get_video_detections(video_id: str):
     if detections is None:
         raise HTTPException(status_code=404, detail="No detections found. Run tracking first.")
     return detections
+
+
+@app.get("/videos/{video_id}/frames/{frame_idx}/detections_overlay")
+async def get_detections_overlay(video_id: str, frame_idx: int):
+    """Return a JPEG of the raw video frame with BotSort bounding boxes overlaid."""
+    video_info = _get_video_or_404(video_id)
+
+    detections = store.detections_cache.get(video_id) or load_detections(video_id)
+    if detections is None:
+        raise HTTPException(status_code=404, detail="No detections found. Run tracking first.")
+
+    try:
+        fps = video_info["fps"] or 25
+        cap = cv2.VideoCapture(video_info["path"])
+        cap.set(cv2.CAP_PROP_POS_MSEC, frame_idx / fps * 1000)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            raise HTTPException(status_code=500, detail="Failed to extract frame")
+
+        frame_dets = [d for d in detections if d.frame_idx == frame_idx]
+        for det in frame_dets:
+            x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
+            # Unique colour per track ID (same HSV hue trick as the pitch canvas)
+            hue = int((det.track_id * 137.508) % 180)
+            colour_hsv = np.array([[[hue, 220, 220]]], dtype=np.uint8)
+            colour_bgr = cv2.cvtColor(colour_hsv, cv2.COLOR_HSV2BGR)[0][0].tolist()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), colour_bgr, 2)
+            label = f"#{det.track_id}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), colour_bgr, -1)
+            cv2.putText(frame, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed detections_overlay {frame_idx} for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create overlay: {str(e)}")
 
 
 @app.post("/videos/{video_id}/track", response_model=TrackResponse)
@@ -429,83 +434,6 @@ async def track_video(video_id: str):
     return TrackResponse(frames_processed=frames_processed, tracks=unique_tracks)
 
 
-@app.post("/videos/{video_id}/homographies/v2")
-async def compute_homographies_v2(
-    video_id: str,
-    annotations: List[AnchorFrameAnnotation],
-    num_samples_per_line: int = Query(10, ge=2, le=50, description="Points to sample per line"),
-    max_iterations: int = Query(3, ge=1, le=10, description="Maximum refinement iterations"),
-    keypoint_weight: int = Query(3, ge=1, le=10, description="Weight multiplier for keypoints vs line points"),
-):
-    """
-    Compute homography matrices with line constraint support.
-
-    Accepts both keypoint and line annotations per anchor frame. Line annotations
-    provide additional constraints for regions where point intersections are not
-    visible (e.g., midfield). Propagates anchor homographies to every frame via
-    ORB feature matching.
-
-    Available line IDs: 13m_top, 20m_top, 45m_top, 65m_top, halfway,
-    65m_bottom, 45m_bottom, 20m_bottom, 13m_bottom.
-    """
-    video_info = _get_video_or_404(video_id)
-
-    annotations_dict = {
-        ann.frame_idx: {"keypoints": ann.points, "lines": ann.lines}
-        for ann in annotations
-    }
-
-    try:
-        anchor_homographies, computation_info = await asyncio.to_thread(
-            partial(
-                compute_homographies_with_lines,
-                annotations_dict,
-                num_samples_per_line=num_samples_per_line,
-                max_iterations=max_iterations,
-                keypoint_weight=keypoint_weight,
-            )
-        )
-    except Exception as e:
-        logger.error(f"Line-constrained homography computation failed for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Homography computation failed: {str(e)}")
-
-    if not anchor_homographies:
-        raise HTTPException(status_code=400, detail="No valid homographies computed. Need at least 4 keypoints per frame.")
-
-    store.anchor_homographies_cache[video_id] = anchor_homographies
-    save_anchor_homographies(video_id, anchor_homographies)
-    save_annotations(video_id, annotations_dict)
-
-    try:
-        per_frame_hs, _ = await asyncio.to_thread(
-            partial(
-                build_constrained_per_frame_H,
-                video_info["path"],
-                anchor_homographies,
-                start_frame=0,
-                end_frame=video_info["num_frames"] - 1,
-            )
-        )
-    except Exception as e:
-        logger.error(f"Per-frame H propagation failed for video {video_id}: {e}")
-        per_frame_hs = anchor_homographies
-
-    store.homographies_cache[video_id] = per_frame_hs
-    save_homographies(video_id, per_frame_hs)
-
-    total_lines_used = sum(info.get('valid_lines', 0) for info in computation_info.values())
-    logger.info(
-        f"Computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
-        f"for video {video_id} using {total_lines_used} line constraints"
-    )
-
-    return {
-        "frames": sorted(anchor_homographies.keys()),
-        "per_frame_count": len(per_frame_hs),
-        "info": {str(k): v for k, v in computation_info.items()},
-    }
-
-
 @app.post("/videos/{video_id}/homographies/v3")
 async def compute_homographies_v3(
     video_id: str,
@@ -516,16 +444,11 @@ async def compute_homographies_v3(
     keypoint_weight: float = Query(20.0, ge=1.0, le=100.0, description="Weight multiplier for keypoints vs line samples (higher = lines reinforce more gently)"),
 ):
     """
-    Compute homography matrices using genuine DLT line constraints (v3).
+    Compute anchor homographies using DLT line constraints, then propagate
+    per-frame via Lucas-Kanade optical flow with drift correction and SG smoothing.
 
-    Unlike v2, each line annotation provides one-dimensional constraints
-    directly in the DLT system (one row per sample point) rather than
-    synthetic full-point correspondences that circularly depend on the
-    current H estimate.
-
-    Results are stored separately from v2 and do not overwrite them.
-    Per-frame Hs are propagated via Lucas-Kanade optical flow with forward-backward
-    consistency, bidirectional drift correction, and Savitzky-Golay smoothing.
+    Each line annotation provides one-dimensional constraints directly in the
+    DLT system (one row per sample point).
     """
     from pipeline.homography import compute_homographies_with_lines_v3
 
@@ -557,8 +480,8 @@ async def compute_homographies_v3(
             detail="No valid v3 homographies computed. Ensure at least one frame has line annotations."
         )
 
-    store.v3_anchor_homographies_cache[video_id] = anchor_homographies
-    save_v3_anchor_homographies(video_id, anchor_homographies)
+    store.v3_anchor_H_cache[video_id] = anchor_homographies
+    _save_homography_dict(video_id, "v3_anchor_homographies", anchor_homographies)
     save_annotations(video_id, annotations_dict)
 
     try:
@@ -579,8 +502,8 @@ async def compute_homographies_v3(
         logger.error(f"v3 per-frame H propagation failed for video {video_id}: {e}")
         per_frame_hs = anchor_homographies
 
-    store.v3_homographies_cache[video_id] = per_frame_hs
-    save_v3_homographies(video_id, per_frame_hs)
+    store.v3_per_frame_H_cache[video_id] = per_frame_hs
+    _save_homography_dict(video_id, "v3_homographies", per_frame_hs)
 
     logger.info(
         f"v3 DLT: computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
@@ -597,7 +520,7 @@ async def compute_homographies_v3(
 @app.get("/line-constraints/available-lines")
 async def get_available_line_ids():
     """Get available line IDs and their Y positions (meters) for line annotations."""
-    from pipeline.line_constraints import GAA_PITCH_LINES
+    from pipeline.gaa_pitch_config import GAA_PITCH_LINES
     return {
         "lines": GAA_PITCH_LINES,
         "description": {
@@ -623,21 +546,18 @@ async def map_players(video_id: str):
     if detections is None:
         raise HTTPException(status_code=400, detail="No detections found. Run tracking first.")
 
-    homographies = (
-        store.v3_homographies_cache.get(video_id) or load_v3_homographies(video_id) or
-        store.homographies_cache.get(video_id) or load_homographies(video_id)
-    )
+    homographies = store.v3_per_frame_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_homographies")
     if homographies is None:
         raise HTTPException(status_code=400, detail="No homographies found. Compute homographies first.")
 
-    anchor_hs = (
-        store.v3_anchor_homographies_cache.get(video_id) or load_v3_anchor_homographies(video_id) or
-        store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
-    )
+    anchor_hs = store.v3_anchor_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_anchor_homographies")
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
     try:
-        positions = map_players_to_pitch(detections, homographies, anchor_frame_indices=anchor_frame_indices)
+        positions = map_players_to_pitch(
+            detections, homographies,
+            anchor_frame_indices=anchor_frame_indices,
+        )
         store.player_positions_cache[video_id] = positions
     except Exception as e:
         logger.error(f"Player mapping failed for video {video_id}: {e}")
@@ -647,50 +567,6 @@ async def map_players(video_id: str):
     return positions
 
 
-# Reference lines for the warped_with_lines overlay: (label, y_meters, bgr_colour)
-_REFERENCE_LINES = [
-    ("13m",     13.0, (0, 200, 255)),
-    ("20m",     20.0, (0, 255, 0)),
-    ("45m",     45.0, (255, 128, 0)),
-    ("65m",     65.0, (128, 0, 255)),
-    ("halfway", 70.0, (255, 255, 0)),
-]
-
-
-@app.get("/videos/{video_id}/frames/{frame_idx}/warped_with_lines")
-async def get_warped_frame_with_lines(video_id: str, frame_idx: int):
-    """Return a warped JPEG with horizontal pitch reference lines overlaid."""
-    video_info = _get_video_or_404(video_id)
-
-    H, _ = find_nearest_homography(video_id, frame_idx)
-    if H is None:
-        raise HTTPException(status_code=400, detail="No homographies computed for this video")
-
-    try:
-        cap = cv2.VideoCapture(video_info["path"])
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            raise HTTPException(status_code=500, detail="Failed to extract frame")
-
-        warped = distorted_homography_warp(frame, H, OUT_W, OUT_H, K1)
-
-        for label, y_m, colour in _REFERENCE_LINES:
-            y_px = int(y_m / GAA_PITCH_LENGTH * OUT_H)
-            x, dash_len = 0, 20
-            while x < OUT_W:
-                cv2.line(warped, (x, y_px), (min(x + dash_len, OUT_W), y_px), colour, 2)
-                x += dash_len * 2
-            cv2.putText(warped, label, (4, y_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
-
-        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return Response(content=buffer.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=300"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed warped_with_lines {frame_idx} for video {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create warped frame: {str(e)}")
 
 
 @app.get("/videos/{video_id}/homographies/anchor-quality")
@@ -698,7 +574,6 @@ async def get_anchor_quality(video_id: str):
     """
     Compute per-keypoint reprojection error for each anchor frame.
 
-    Works with both v2 and v3 anchor homographies (v2 takes priority if both exist).
     """
     _get_video_or_404(video_id)
 
@@ -706,12 +581,7 @@ async def get_anchor_quality(video_id: str):
     if annotations is None:
         raise HTTPException(status_code=400, detail="No annotations found. Compute homographies first.")
 
-    anchor_hs = (
-        store.anchor_homographies_cache.get(video_id)
-        or load_anchor_homographies(video_id)
-        or store.v3_anchor_homographies_cache.get(video_id)
-        or load_v3_anchor_homographies(video_id)
-    )
+    anchor_hs = store.v3_anchor_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_anchor_homographies")
     if not anchor_hs:
         raise HTTPException(status_code=400, detail="No anchor homographies found. Compute homographies first.")
 
@@ -834,7 +704,7 @@ async def interpolate_trajectories_endpoint(
 
         existing_filtered = [
             p for p in sparse_positions
-            if not (start_frame <= p.frame_idx <= end_frame and p.source == "interpolated")
+            if not (start_frame <= p.frame_idx <= end_frame)
         ]
         store.player_positions_cache[video_id] = existing_filtered + interpolated
 
@@ -859,84 +729,3 @@ async def get_player_positions(video_id: str):
     return sorted(positions, key=lambda p: (p.frame_idx, p.track_id))
 
 
-@app.get("/videos/{video_id}/diagnostics/per-frame-mapping")
-async def diagnostics_per_frame_mapping(video_id: str):
-    """
-    Compute per-frame mapping accuracy using annotated 20m_top line points as
-    simulated players with a known expected canvas Y position.
-
-    Compares per-frame propagated H vs nearest anchor H accuracy.
-    Requires that /homographies/v2 has been run first.
-    """
-    _get_video_or_404(video_id)
-
-    annotations = load_annotations(video_id)
-    if annotations is None:
-        raise HTTPException(status_code=400, detail="No annotations found. Compute homographies (v2) first.")
-
-    anchor_hs = store.anchor_homographies_cache.get(video_id) or load_anchor_homographies(video_id)
-    if not anchor_hs:
-        raise HTTPException(status_code=400, detail="No anchor homographies found. Compute homographies (v2) first.")
-
-    per_frame_hs = store.homographies_cache.get(video_id) or load_homographies(video_id)
-    if not per_frame_hs:
-        raise HTTPException(status_code=400, detail="No per-frame homographies found. Compute homographies (v2) first.")
-
-    from pipeline.homography import map_pixel_to_pitch
-
-    expected_y_20m = 20.0 / GAA_PITCH_LENGTH * OUT_H
-    anchor_list = sorted(anchor_hs.keys())
-    results = []
-
-    for idx_in_list, anchor_frame_idx in enumerate(anchor_list):
-        ann = annotations.get(anchor_frame_idx, {})
-        line_20m = next((l for l in ann.get("lines", []) if l.get("line_id") == "20m_top"), None)
-        if line_20m is None:
-            continue
-
-        mid_img_x = (line_20m["u1"] + line_20m["u2"]) / 2.0
-        mid_img_y = (line_20m["v1"] + line_20m["v2"]) / 2.0
-        next_anchor = anchor_list[idx_in_list + 1] if idx_in_list + 1 < len(anchor_list) else anchor_frame_idx + 1
-
-        for f in range(anchor_frame_idx, next_anchor):
-            H_pf = per_frame_hs.get(f)
-            if H_pf is None:
-                continue
-
-            nearest = min(anchor_list, key=lambda a: abs(a - f))
-            H_na = anchor_hs[nearest]
-
-            _, y_pf = map_pixel_to_pitch(mid_img_x, mid_img_y, H_pf)
-            _, y_na = map_pixel_to_pitch(mid_img_x, mid_img_y, H_na)
-
-            err_pf = abs(y_pf - expected_y_20m)
-            err_na = abs(y_na - expected_y_20m)
-
-            results.append({
-                "frame": f,
-                "y_pf": round(float(y_pf), 2),
-                "y_na": round(float(y_na), 2),
-                "err_pf": round(float(err_pf), 2),
-                "err_na": round(float(err_na), 2),
-                "improvement": round(float(err_na - err_pf), 2),
-            })
-
-    if not results:
-        return {"frames": [], "summary": None}
-
-    errs_pf = [r["err_pf"] for r in results]
-    errs_na = [r["err_na"] for r in results]
-    pct_better = 100.0 * sum(1 for r in results if r["improvement"] > 2) / len(results)
-
-    return {
-        "frames": results,
-        "summary": {
-            "median_pf": round(float(np.median(errs_pf)), 2),
-            "mean_pf": round(float(np.mean(errs_pf)), 2),
-            "max_pf": round(float(np.max(errs_pf)), 2),
-            "median_na": round(float(np.median(errs_na)), 2),
-            "mean_na": round(float(np.mean(errs_na)), 2),
-            "max_na": round(float(np.max(errs_na)), 2),
-            "pct_better": round(pct_better, 1),
-        },
-    }

@@ -806,6 +806,27 @@ button.warning:hover {
   background-color: #000;
 }
 
+.botsort-overlay-section {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.botsort-overlay-section h4 {
+  margin: 0 0 10px;
+  color: #333;
+}
+
+.botsort-overlay-img {
+  max-width: 100%;
+  height: auto;
+  border: 2px solid #333;
+  border-radius: 4px;
+  display: block;
+}
+
 .video-placeholder {
   width: 480px;
   height: 270px;

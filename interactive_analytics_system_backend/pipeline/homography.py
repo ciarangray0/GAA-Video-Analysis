@@ -1,10 +1,10 @@
 """Homography computation and pixel-to-pitch mapping.
 
 Coordinate System:
-    Image pixels (camera) → Homography H → Pitch canvas pixels → Radial distortion → Output
+    Image pixels (camera) → Homography H → Pitch canvas pixels
 
 The pitch canvas is OUT_W × OUT_H pixels (850 × 1400).  Meters are never used
-after the destination points are set up.  Radial distortion (K1) is always applied.
+after the destination points are set up.
 """
 import re
 from typing import Dict, List, Optional, Tuple
@@ -12,12 +12,12 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from pipeline.config import K1, OUT_H, OUT_W
-from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES
+from pipeline.config import OUT_H, OUT_W
+from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES, GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
 from pipeline.schemas import LineAnnotation, PitchPoint
 
-_PITCH_M_W = 85.0
-_PITCH_M_H = 140.0
+_REPROJECTION_OUTLIER_PX = 30.0   # threshold above which a keypoint is labelled "outlier"
+_REPROJECTION_HIGH_PX    = 15.0   # threshold above which a keypoint is labelled "high" error
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +26,8 @@ _PITCH_M_H = 140.0
 
 def _meters_to_canvas_pixels(x_m: float, y_m: float) -> Tuple[float, float]:
     """Convert pitch vertex coordinates (meters) to canvas pixels."""
-    return x_m / _PITCH_M_W * OUT_W, y_m / _PITCH_M_H * OUT_H
+    return x_m / GAA_PITCH_WIDTH * OUT_W, y_m / GAA_PITCH_LENGTH * OUT_H
+
 
 
 def _compute_coverage_score(
@@ -126,32 +127,26 @@ def map_pixel_to_pitch(
     x_img: float,
     y_img: float,
     H: np.ndarray,
-    out_w: Optional[int] = None,
-    out_h: Optional[int] = None,
-    k1: Optional[float] = None,
 ) -> Tuple[float, float]:
-    """Map an image pixel → pitch canvas coordinates with radial distortion.
-
-    Steps:
-        1. Apply homography: image pixels → pitch canvas pixels
-        2. Apply radial distortion (always applied, matches research notebook)
-    """
-    if out_w is None:
-        out_w = OUT_W
-    if out_h is None:
-        out_h = OUT_H
-    if k1 is None:
-        k1 = K1
-
+    """Map an image pixel → pitch canvas coordinates via homography."""
     p = np.array([x_img, y_img, 1.0], dtype=np.float32)
     pitch = H @ p
     pitch /= pitch[2]
-    x, y = float(pitch[0]), float(pitch[1])
+    return float(pitch[0]), float(pitch[1])
 
-    cx, cy = out_w / 2.0, out_h / 2.0
-    dx, dy = x - cx, y - cy
-    r2 = dx * dx + dy * dy
-    return x + dx * k1 * r2, y + dy * k1 * r2
+
+def _compute_reprojection_errors(
+    H: np.ndarray,
+    pts_image: np.ndarray,
+    pts_canvas: np.ndarray,
+) -> np.ndarray:
+    """Return per-point reprojection errors (canvas pixels)."""
+    errors = []
+    for img_pt, can_pt in zip(pts_image, pts_canvas):
+        proj = H @ np.array([img_pt[0], img_pt[1], 1.0], dtype=np.float64)
+        proj /= proj[2]
+        errors.append(float(np.sqrt((proj[0] - can_pt[0]) ** 2 + (proj[1] - can_pt[1]) ** 2)))
+    return np.array(errors, dtype=np.float64)
 
 
 def _fill_info(
@@ -167,21 +162,18 @@ def _fill_info(
     img_height: Optional[int],
 ) -> None:
     """Populate computation_info[frame_idx] with reprojection errors and quality."""
-    kp_errors: List[float] = []
-    kp_details = []
-    for kp, img_pt, can_pt in zip(keypoints, pts_image, pts_canvas):
-        proj = H @ np.array([img_pt[0], img_pt[1], 1.0])
-        proj /= proj[2]
-        err = float(np.sqrt((proj[0] - can_pt[0]) ** 2 + (proj[1] - can_pt[1]) ** 2))
-        kp_errors.append(err)
-        kp_details.append({
+    kp_errors = _compute_reprojection_errors(H, pts_image, pts_canvas).tolist()
+    kp_details = [
+        {
             "pitch_id": kp.pitch_id,
             "error_px": round(err, 2),
-            "verdict": "outlier" if err > 30 else "high" if err > 15 else "good",
-        })
+            "verdict": "outlier" if err > _REPROJECTION_OUTLIER_PX else "high" if err > _REPROJECTION_HIGH_PX else "good",
+        }
+        for kp, err in zip(keypoints, kp_errors)
+    ]
 
     mean_err = float(np.mean(kp_errors)) if kp_errors else 0.0
-    n_outliers = sum(1 for e in kp_errors if e > 30)
+    n_outliers = sum(1 for e in kp_errors if e > _REPROJECTION_OUTLIER_PX)
     coverage = (
         _compute_coverage_score(pts_image, img_width, img_height)
         if img_width and img_height else None
@@ -196,132 +188,11 @@ def _fill_info(
         "valid_lines": valid_lines,
         "synthetic_points": n_line_pts,
         "quality": (
-            "bad" if (n_outliers > 0 or mean_err > 30)
-            else "warning" if (mean_err > 15 or (coverage is not None and coverage < 0.5))
+            "bad" if (n_outliers > 0 or mean_err > _REPROJECTION_OUTLIER_PX)
+            else "warning" if (mean_err > _REPROJECTION_HIGH_PX or (coverage is not None and coverage < 0.5))
             else "good"
         ),
     }
-
-
-def compute_homographies_with_lines(
-    annotations: Dict[int, Dict],
-    num_samples_per_line: int = 10,
-    max_iterations: int = 3,
-    keypoint_weight: int = 3,
-    img_width: Optional[int] = None,
-    img_height: Optional[int] = None,
-) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
-    """Compute anchor homographies from keypoints + optional line constraints.
-
-    Args:
-        annotations:          Dict mapping frame_idx → ``{"keypoints": [...], "lines": [...]}``
-        num_samples_per_line: Synthetic points sampled per line annotation.
-        max_iterations:       Line-constraint refinement iterations.
-        keypoint_weight:      Weight multiplier applied to keypoints vs synthetic points.
-        img_width:            Source video frame width (px) — used for coverage scoring.
-        img_height:           Source video frame height (px) — used for coverage scoring.
-
-    Returns:
-        Tuple of:
-        - homographies: Dict[frame_idx → 3×3 H]
-        - computation_info: Dict[frame_idx → quality dict] containing:
-            - repr_mean / repr_max (px): reprojection errors over keypoints
-            - keypoints: per-point list with pitch_id, error_px, verdict
-            - coverage: fraction of frame grid cells occupied (0–1), or None
-            - quality: 'good' | 'warning' | 'bad'
-            - valid_lines, iterations, converged, synthetic_points, line_warnings
-    """
-    from pipeline.line_constraints import compute_line_constrained_homography
-
-    homographies: Dict[int, np.ndarray] = {}
-    computation_info: Dict[int, dict] = {}
-
-    for frame_idx, ann in annotations.items():
-        if isinstance(ann, list):
-            keypoints: List[PitchPoint] = ann
-            lines = []
-        else:
-            keypoints = ann.get("keypoints", [])
-            lines = ann.get("lines", [])
-
-        if len(keypoints) < 4:
-            computation_info[frame_idx] = {
-                "error": f"Too few keypoints ({len(keypoints)} < 4)",
-                "quality": "bad",
-            }
-            continue
-
-        pts_image = np.array([[p.x_img, p.y_img] for p in keypoints], dtype=np.float32)
-        pts_canvas = np.array(
-            [_meters_to_canvas_pixels(*resolve_pitch_coordinates(p.pitch_id)) for p in keypoints],
-            dtype=np.float32,
-        )
-
-        line_dicts = []
-        for line in lines:
-            if isinstance(line, LineAnnotation):
-                line_dicts.append({
-                    "line_id": line.line_id,
-                    "u1": line.u1, "v1": line.v1,
-                    "u2": line.u2, "v2": line.v2,
-                })
-            elif isinstance(line, dict):
-                line_dicts.append(line)
-
-        try:
-            H, info = compute_line_constrained_homography(
-                pts_image, pts_canvas, line_dicts,
-                num_samples_per_line=num_samples_per_line,
-                max_iterations=max_iterations,
-                keypoint_weight=keypoint_weight,
-            )
-        except ValueError as e:
-            computation_info[frame_idx] = {
-                "error": str(e), "valid_lines": 0, "iterations": 0, "quality": "bad",
-            }
-            continue
-
-        homographies[frame_idx] = H
-
-        # ── Per-keypoint reprojection errors ────────────────────────────────
-        info["num_keypoints"] = len(keypoints)
-        kp_errors: List[float] = []
-        kp_details = []
-        for kp, img_pt, can_pt in zip(keypoints, pts_image, pts_canvas):
-            proj = H @ np.array([img_pt[0], img_pt[1], 1.0], dtype=np.float64)
-            proj /= proj[2]
-            err = float(np.sqrt((proj[0] - can_pt[0]) ** 2 + (proj[1] - can_pt[1]) ** 2))
-            kp_errors.append(err)
-            kp_details.append({
-                "pitch_id": kp.pitch_id,
-                "error_px": round(err, 2),
-                "verdict": "outlier" if err > 30 else "high" if err > 15 else "good",
-            })
-
-        info["keypoints"] = kp_details
-        info["repr_mean"] = round(float(np.mean(kp_errors)), 2) if kp_errors else None
-        info["repr_max"] = round(float(np.max(kp_errors)), 2) if kp_errors else None
-
-        # ── Spatial coverage score ───────────────────────────────────────────
-        info["coverage"] = (
-            _compute_coverage_score(pts_image, img_width, img_height)
-            if img_width and img_height else None
-        )
-
-        # ── Overall quality rating ───────────────────────────────────────────
-        n_outliers = sum(1 for e in kp_errors if e > 30)
-        mean_err = info["repr_mean"] or 0.0
-        coverage = info["coverage"] if info["coverage"] is not None else 1.0
-        if n_outliers > 0 or mean_err > 30:
-            info["quality"] = "bad"
-        elif mean_err > 15 or coverage < 0.5:
-            info["quality"] = "warning"
-        else:
-            info["quality"] = "good"
-
-        computation_info[frame_idx] = info
-
-    return homographies, computation_info
 
 
 def compute_homographies_with_lines_v3(
@@ -493,8 +364,3 @@ def compute_homographies_with_lines_v3(
     return homographies, computation_info
 
 
-# ---------------------------------------------------------------------------
-# Legacy alias
-# ---------------------------------------------------------------------------
-
-map_pixel_to_distorted_pitch = map_pixel_to_pitch
