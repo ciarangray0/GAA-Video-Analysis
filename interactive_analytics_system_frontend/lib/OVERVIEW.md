@@ -17,6 +17,9 @@ All backend API calls. Every function throws a typed `Error` on HTTP failure (pa
 | `mapPlayers(videoId)` | `POST /videos/{id}/map_players` | Returns `PlayerPosition[]` |
 | `interpolateTrajectories(videoId, start, end, params)` | `POST /videos/{id}/interpolate?...` | Builds query string from `InterpolationParams`, returns `{frames_generated, method}` |
 | `getPlayerPositions(videoId)` | `GET /videos/{id}/players` | Returns all player positions (sparse + interpolated) |
+| `classifyTeams(videoId)` | `POST /videos/{id}/classify-teams` | Runs jersey-colour classification; returns `ClassifyTeamsResponse` (`{classifications, summary}`) |
+| `getTeamClassifications(videoId)` | `GET /videos/{id}/classify-teams` | Returns stored `TeamClassifications` dict; returns `{}` on 404 (non-throwing) |
+| `overrideTeamClassification(videoId, trackId, team)` | `PATCH /videos/{id}/classify-teams` | Overrides one track's team assignment; returns updated `TeamClassifications` |
 
 **`API_URL`** is read from `process.env.NEXT_PUBLIC_API_URL` at build time, defaulting to `http://localhost:8000`.
 
@@ -54,20 +57,29 @@ Draws the pitch diagram for the annotation UI.
 7. Annotated vertices (in `currentAnchor.points`) are drawn green.
 8. If `pendingFrameClick`: draws an overlay text box at the bottom showing the pending image coordinates and instructions.
 
-### `drawPitch(canvas, positions, frame)`
-Draws the results pitch view.
+### `drawPitch(canvas, positions, frame, teamClassifications?)`
+Draws the results pitch view. The optional `teamClassifications` argument is a `TeamClassifications` dict (keyed by `track_id.toString()`).
 
 1. Resets canvas to `PITCH_DISPLAY_WIDTH × PITCH_DISPLAY_HEIGHT`, fills green background, draws white border inset 2px.
 2. Draws all pitch markings at `rgba(255,255,255,0.55)` opacity.
 3. Draws 20m semicircles (radius = 13/140 × HEIGHT, curving into pitch from the 20m lines).
-4. **Track filter:** removes tracks with fewer than 30 position entries across the full dataset (~1 second at 30fps). This hides spurious short tracks from the display without removing them from the data.
-5. **Ghost dots:** for each track that appeared in some past frame but is absent from the current frame, finds the most recent position and draws a grey semi-transparent dot. Ghost dots are drawn first (underneath active dots).
-6. **Active player dots:** for each position at `frame`, draws a coloured filled circle (radius 8px) with a white stroke (red stroke if out-of-bounds). Track ID printed inside. Colour uses the golden-angle HSL scheme:
-   ```typescript
-   const getPlayerColor = (trackId: number) => `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
-   ```
-   Multiplying by 137.508° (the golden angle) ensures adjacent track IDs get maximally different hues.
-7. Frame/player count overlay (top-left corner).
+4. **Ghost dots:** for each track that appeared in some past frame but is absent from the current frame, finds the most recent position and draws a grey semi-transparent dot. Ghost dots are drawn first (underneath active dots).
+5. **Active player dots:** for each position at `frame`, draws a coloured filled circle (radius 8px) with a white stroke (red stroke if out-of-bounds). Track ID printed inside.
+
+**Colour logic (`getPlayerColor`):**
+- If `teamClassifications` is provided and the track has `team === 'referee'` or `team === 'ignore'`: returns `null` — the track is hidden entirely.
+- If `team === 'ellistown'`: returns `'#FFD700'` (gold).
+- If `team === 'opposition'`: returns `'#4488FF'` (blue).
+- Otherwise (no classification or unrecognised team): falls back to the golden-angle HSL scheme:
+  ```typescript
+  `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
+  ```
+  Multiplying by 137.508° (the golden angle) ensures adjacent track IDs get maximally different hues.
+
+6. Frame/player count overlay (top-left corner).
+
+### `hsvToCss(h_cv, s_cv, v_cv) → string`
+Converts OpenCV HSV values (H 0–179, S 0–255, V 0–255) to a CSS `rgb()` string. Used by `ResultsViewer` to render jersey-colour swatches in the team classification panel. Exported alongside `drawPitch`.
 
 ---
 

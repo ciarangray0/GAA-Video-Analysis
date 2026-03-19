@@ -89,7 +89,7 @@ export default function AnchorFrameAnnotator({
 
   const frameCanvasRef = useRef<HTMLCanvasElement>(null)
   const frameImageRef = useRef<HTMLImageElement | null>(null)
-  const pitchDiagramRef = useRef<HTMLCanvasElement>(null)
+  const [pitchDiagramEl, setPitchDiagramEl] = useState<HTMLCanvasElement | null>(null)
   const importAnnotationsRef = useRef<HTMLInputElement>(null)
   // Tracks which frame index the most recent loadFrameImage call is for,
   // preventing a slower earlier load from overwriting a newer one.
@@ -210,10 +210,10 @@ export default function AnchorFrameAnnotator({
   }, [anchorFrames, currentAnchorIdx, drawFrameWithPoints, loadingFrame, pendingLinePoint1])
 
   useEffect(() => {
-    if (anchorFrames.length > 0 && pitchDiagramRef.current) {
-      drawPitchDiagram(pitchDiagramRef.current, anchorFrames, currentAnchorIdx, pendingFrameClick, pendingLinePoint1)
+    if (anchorFrames.length > 0 && pitchDiagramEl) {
+      drawPitchDiagram(pitchDiagramEl, anchorFrames, currentAnchorIdx, pendingFrameClick, pendingLinePoint1)
     }
-  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pendingLinePoint1])
+  }, [pendingFrameClick, anchorFrames, currentAnchorIdx, pendingLinePoint1, pitchDiagramEl])
 
   /** Map a mouse event on the frame canvas to original image pixel coordinates.
    *
@@ -276,7 +276,7 @@ export default function AnchorFrameAnnotator({
 
   const handlePitchDiagramClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!pendingFrameClick) return
-    const canvas = pitchDiagramRef.current
+    const canvas = pitchDiagramEl
     if (!canvas) return
 
     const rect = canvas.getBoundingClientRect()
@@ -684,7 +684,7 @@ export default function AnchorFrameAnnotator({
             <div className="pitch-panel">
               <h4>Pitch Diagram</h4>
               <canvas
-                ref={pitchDiagramRef}
+                ref={setPitchDiagramEl}
                 onClick={handlePitchDiagramClick}
                 className={`pitch-diagram ${pendingFrameClick ? 'awaiting-click' : ''}`}
               />

@@ -50,7 +50,8 @@ GAA-Video-Analysis/
 │   │   ├── line_constraints.py        ← sample_points_on_line, re-exports line dicts
 │   │   ├── constrained_homography.py  ← Per-frame H propagation via LK optical flow
 │   │   ├── map_players.py             ← Filter detections, map bbox → pitch coords
-│   │   └── trajectories.py            ← Linear interp → SG smooth → velocity clamp
+│   │   ├── trajectories.py            ← Linear interp → SG smooth → velocity clamp
+│   │   └── team_classifier.py         ← Jersey-colour HSV classification per track
 │   └── gpu_inference/
 │       ├── __init__.py                ← GPUInferenceClient (HTTP client for Modal)
 │       └── modal_yolo.py              ← Modal serverless GPU service definition
@@ -102,7 +103,7 @@ GAA-Video-Analysis/
 │                                                             │
 │  VideoStore (in-memory)                                     │
 │    └── videos, detections, anchor_Hs, per_frame_Hs,         │
-│        player_positions                                     │
+│        player_positions, team_classifications               │
 │                                                             │
 │  Pipeline modules (pure Python/NumPy/OpenCV/SciPy)          │
 │    detect → homography → constrained_homography →           │
@@ -462,7 +463,7 @@ Default `max_vel_px = 4.0` corresponds to 10 m/s at 10 px/m and 25 fps — appro
 **File:** `components/ResultsViewer.tsx`, `lib/pitch.ts`
 
 **Side-by-side layout:**
-- Left: HTML `<video>` element using a blob URL created from the uploaded `File` object.
+- Left: HTML `<video>` element using a blob URL created from the uploaded `File` object. The video is always synced to `currentFrame` when not playing (no user-togglable sync mode).
 - Right: `<canvas>` redrawn on every frame change via `drawPitch`.
 
 **Playback loop:**
@@ -475,9 +476,15 @@ video.play().then(() => {
 
 **`drawPitch` (lib/pitch.ts):**
 1. Draws the green pitch background + white markings (lines, semicircles, boxes).
-2. Filters out tracks with fewer than 30 position entries (suppresses spurious short tracks).
-3. Draws **ghost dots** (grey, semi-transparent) for tracks seen in past frames but absent now.
-4. Draws **active player dots** coloured by `hsl((track_id × 137.508) % 360, 70%, 50%)` — the golden angle ensures maximally different hues for adjacent track IDs.
+2. Draws **ghost dots** (grey, semi-transparent) for tracks seen in past frames but absent now.
+3. Draws **active player dots**. Colour depends on whether `teamClassifications` was passed:
+   - If the track is classified as `'referee'` or `'ignore'`, it is hidden entirely.
+   - If classified as `'ellistown'`: gold (`#FFD700`).
+   - If classified as `'opposition'`: blue (`#4488FF`).
+   - Otherwise: `hsl((track_id × 137.508) % 360, 70%, 50%)` — the golden angle ensures maximally different hues for adjacent track IDs.
+
+**Team Classification:**
+A "Classify Teams" button calls `POST /videos/{id}/classify-teams`, which runs `team_classifier.classify_tracks` on the server. The result is a per-track dict of `{team, confidence, mean_hsv}`. The frontend shows a team panel grouping tracks by team, with jersey-colour swatches, confidence bars, and team override dropdowns. `hsvToCss` converts OpenCV HSV values to CSS colours for the swatch. Overriding a track calls `PATCH /videos/{id}/classify-teams` immediately.
 
 ---
 
@@ -520,11 +527,12 @@ video.play().then(() => {
 
 ```python
 class VideoStore:
-    videos:                 Dict[str, dict]                     # video metadata
-    detections_cache:       Dict[str, List[Detection]]          # YOLO detections
-    v3_anchor_H_cache:      Dict[str, Dict[int, np.ndarray]]    # anchor frame Hs
-    v3_per_frame_H_cache:   Dict[str, Dict[int, np.ndarray]]    # propagated per-frame Hs
-    player_positions_cache: Dict[str, List[PlayerPitchPosition]] # mapped + interpolated
+    videos:                      Dict[str, dict]                       # video metadata
+    detections_cache:            Dict[str, List[Detection]]            # YOLO detections
+    v3_anchor_H_cache:           Dict[str, Dict[int, np.ndarray]]      # anchor frame Hs
+    v3_per_frame_H_cache:        Dict[str, Dict[int, np.ndarray]]      # propagated per-frame Hs
+    player_positions_cache:      Dict[str, List[PlayerPitchPosition]]  # mapped + interpolated
+    team_classifications_cache:  Dict[str, Dict[int, dict]]            # jersey-colour classifications
 ```
 
 All dicts keyed by `video_id` (UUID string). The store is a module-level singleton (`store = VideoStore()`).
@@ -539,6 +547,7 @@ data/tracks/{id}.json
 data/annotations/{id}_annotations.json
 data/annotations/{id}_v3_anchor_homographies.json
 data/annotations/{id}_v3_homographies.json
+data/annotations/{id}_team_classifications.json
 ```
 
 Homography matrices are serialised as `Dict[str(frame_idx), List[List[float]]]` (JSON requires string keys; numpy arrays serialise via `.tolist()`).
@@ -562,6 +571,9 @@ Homography matrices are serialised as `Dict[str(frame_idx), List[List[float]]]` 
 | GET | `/videos/{id}/homographies/anchor-quality` | Per-keypoint reprojection quality |
 | POST | `/videos/{id}/interpolate` | Interpolate + smooth trajectories |
 | GET | `/videos/{id}/players` | All player positions |
+| POST | `/videos/{id}/classify-teams` | Classify tracks by jersey colour |
+| GET | `/videos/{id}/classify-teams` | Return stored team classifications |
+| PATCH | `/videos/{id}/classify-teams` | Override a single track's team |
 
 **v3 endpoint parameters:**
 
@@ -681,8 +693,8 @@ After step B, `stepBVersion` state is incremented. Warped-frame thumbnail `<img>
 **RAF playback:**
 `video.play().then(() => requestAnimationFrame(onPlaybackFrame))` — RAF only starts once play() confirms the video is playing. Prevents the pitch canvas updating while the video remains paused.
 
-**Short-track filter:**
-In `drawPitch`, tracks with fewer than 30 position entries across the entire dataset are hidden. This suppresses YOLO false positives (brief detections of crowd members or shadows) without removing them from the underlying data.
+**Team-coloured dots:**
+`drawPitch` accepts an optional `teamClassifications` argument. When provided, Ellistown tracks are drawn gold, opposition blue, and `'referee'`/`'ignore'` tracks are hidden. Without classifications the golden-angle HSL scheme is used for all tracks.
 
 ---
 

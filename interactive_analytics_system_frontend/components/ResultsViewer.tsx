@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { VideoMetadata, PlayerPosition } from '../types'
-import { drawPitch } from '../lib/pitch'
+import type { VideoMetadata, PlayerPosition, TeamClassifications, TeamName, ClassifyTeamsSummary } from '../types'
+import { drawPitch, hsvToCss } from '../lib/pitch'
 import { PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H } from '../lib/constants'
-import { API_URL } from '../lib/api'
+import { API_URL, classifyTeams, getTeamClassifications, overrideTeamClassification } from '../lib/api'
 
 
 interface ResultsViewerProps {
@@ -30,9 +30,14 @@ export default function ResultsViewer({
 }: ResultsViewerProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [playbackSpeed, setPlaybackSpeed] = useState(1)
-  const [isSyncMode, setIsSyncMode] = useState(true)
   const [showBotSortOverlay, setShowBotSortOverlay] = useState(false)
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null)
+
+  // Team classification state
+  const [teamClassifications, setTeamClassifications] = useState<TeamClassifications>({})
+  const [classifySummary, setClassifySummary] = useState<ClassifyTeamsSummary | null>(null)
+  const [isClassifying, setIsClassifying] = useState(false)
+  const [classifyError, setClassifyError] = useState<string | null>(null)
 
   // Debug panel state
   const [showMappingView, setShowMappingView] = useState(false)
@@ -48,12 +53,42 @@ export default function ResultsViewer({
     return () => URL.revokeObjectURL(url)
   }, [videoFile])
 
-  // Redraw pitch when frame changes
+  // Load any previously computed classifications on mount
+  useEffect(() => {
+    getTeamClassifications(videoMetadata.video_id).then(cls => {
+      if (Object.keys(cls).length > 0) setTeamClassifications(cls)
+    })
+  }, [videoMetadata.video_id])
+
+  const handleClassifyTeams = useCallback(async () => {
+    setIsClassifying(true)
+    setClassifyError(null)
+    try {
+      const result = await classifyTeams(videoMetadata.video_id)
+      setTeamClassifications(result.classifications)
+      setClassifySummary(result.summary)
+    } catch (e: any) {
+      setClassifyError(e.message || 'Classification failed')
+    } finally {
+      setIsClassifying(false)
+    }
+  }, [videoMetadata.video_id])
+
+  const handleOverrideTeam = useCallback(async (trackId: number, team: string) => {
+    try {
+      const updated = await overrideTeamClassification(videoMetadata.video_id, trackId, team)
+      setTeamClassifications(updated)
+    } catch (e: any) {
+      console.error('Override failed:', e.message)
+    }
+  }, [videoMetadata.video_id])
+
+  // Redraw pitch when frame or classifications change
   useEffect(() => {
     if (canvasRef.current && playerPositions.length > 0) {
-      drawPitch(canvasRef.current, playerPositions, currentFrame)
+      drawPitch(canvasRef.current, playerPositions, currentFrame, teamClassifications)
     }
-  }, [currentFrame, playerPositions])
+  }, [currentFrame, playerPositions, teamClassifications])
 
   const getFramesWithPositions = useCallback(() => {
     const frames = new Set(playerPositions.map(p => p.frame_idx))
@@ -142,7 +177,7 @@ export default function ResultsViewer({
 
   // Sync video to current frame when not playing
   useEffect(() => {
-    if (!isPlaying && isSyncMode && videoPlayerRef.current && playerPositions.length > 0) {
+    if (!isPlaying && videoPlayerRef.current && playerPositions.length > 0) {
       const video = videoPlayerRef.current
       if (video.readyState >= 2) {
         const timeInSeconds = currentFrame / videoMetadata.fps
@@ -151,7 +186,7 @@ export default function ResultsViewer({
         }
       }
     }
-  }, [currentFrame, isPlaying, isSyncMode, videoMetadata.fps, playerPositions.length])
+  }, [currentFrame, isPlaying, videoMetadata.fps, playerPositions.length])
 
   // Cleanup animation frame on unmount
   useEffect(() => {
@@ -195,11 +230,11 @@ export default function ResultsViewer({
               <option value={4}>4x</option>
             </select>
           </label>
-          <button onClick={() => setIsSyncMode(!isSyncMode)} className={`sync-btn ${isSyncMode ? 'active' : ''}`}>
-            🔗 {isSyncMode ? 'Sync ON' : 'Sync OFF'}
-          </button>
           <button onClick={() => setShowBotSortOverlay(!showBotSortOverlay)} className={`sidebar-toggle ${showBotSortOverlay ? 'active' : ''}`}>
             🎯 BotSort Overlay
+          </button>
+          <button onClick={handleClassifyTeams} disabled={isClassifying} className="sidebar-toggle">
+            {isClassifying ? '⏳ Classifying…' : '🎽 Classify Teams'}
           </button>
         </div>
       </div>
@@ -234,7 +269,7 @@ export default function ResultsViewer({
                 muted
                 playsInline
                 onTimeUpdate={() => {
-                  if (isSyncMode && videoPlayerRef.current && !isPlaying) {
+                  if (videoPlayerRef.current && !isPlaying) {
                     const frameFromVideo = Math.round(videoPlayerRef.current.currentTime * videoMetadata.fps)
                     if (Math.abs(frameFromVideo - currentFrame) > 1) goToFrame(frameFromVideo)
                   }
@@ -249,7 +284,15 @@ export default function ResultsViewer({
             <h4>2D Pitch View</h4>
             <canvas ref={canvasRef} width={PITCH_DISPLAY_WIDTH} height={PITCH_DISPLAY_HEIGHT} className="pitch-canvas" />
             <div className="pitch-legend">
-              <span>● Each player has a unique color based on their track ID</span>
+              {Object.keys(teamClassifications).length > 0 ? (
+                <>
+                  <span style={{ color: '#FFD700' }}>● Ellistown</span>
+                  <span style={{ color: '#4488FF', marginLeft: 12 }}>● Opposition</span>
+                  <span style={{ color: '#888', marginLeft: 12 }}>● Unclassified</span>
+                </>
+              ) : (
+                <span>● Each player has a unique color based on their track ID</span>
+              )}
             </div>
           </div>
 
@@ -288,6 +331,82 @@ export default function ResultsViewer({
           )}
         </div>
       </div>
+
+      {/* Team Classification Panel */}
+      {(Object.keys(teamClassifications).length > 0 || classifyError) && (
+        <details className="debug-panel" open>
+          <summary>🎽 Team Classifications</summary>
+          <div className="debug-panel-body">
+            {classifyError && <p style={{ color: '#f88' }}>{classifyError}</p>}
+
+            {classifySummary && (
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 12, fontSize: 13 }}>
+                <span>Ellistown: <strong>{classifySummary.num_ellistown}</strong></span>
+                <span>Opposition: <strong>{classifySummary.num_opposition}</strong></span>
+                <span>Avg confidence: <strong>{(classifySummary.mean_confidence * 100).toFixed(0)}%</strong></span>
+                {classifySummary.hsv_cluster_separation !== null && (
+                  <span>HSV separation: <strong>{classifySummary.hsv_cluster_separation}</strong></span>
+                )}
+                {classifySummary.low_confidence_tracks.length > 0 && (
+                  <span style={{ color: '#f88' }}>
+                    Low-confidence tracks: {classifySummary.low_confidence_tracks.join(', ')}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {(['ellistown', 'opposition', 'referee', 'ignore'] as TeamName[]).map(team => {
+              const trackIds = Object.entries(teamClassifications)
+                .filter(([, v]) => v.team === team)
+                .map(([k]) => parseInt(k))
+                .sort((a, b) => a - b)
+              if (trackIds.length === 0) return null
+              return (
+                <div key={team} style={{ marginBottom: 12 }}>
+                  <strong style={{ textTransform: 'capitalize' }}>{team}</strong>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {trackIds.map(tid => {
+                      const cls = teamClassifications[tid.toString()]
+                      const [h, s, v] = cls.mean_hsv
+                      const swatchColor = hsvToCss(h, s, v)
+                      return (
+                        <div key={tid} style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          background: '#1a1a2e', borderRadius: 6, padding: '4px 8px', fontSize: 12,
+                        }}>
+                          <div style={{
+                            width: 14, height: 14, borderRadius: '50%',
+                            background: swatchColor, border: '1px solid #555', flexShrink: 0,
+                          }} title={`HSV: ${h.toFixed(0)}, ${s.toFixed(0)}, ${v.toFixed(0)}`} />
+                          <span>#{tid}</span>
+                          <div style={{
+                            width: 40, height: 4, background: '#333', borderRadius: 2, overflow: 'hidden',
+                          }}>
+                            <div style={{
+                              width: `${cls.confidence * 100}%`, height: '100%',
+                              background: cls.confidence >= 0.6 ? '#4caf50' : '#f88',
+                            }} />
+                          </div>
+                          <select
+                            value={cls.team}
+                            onChange={(e) => handleOverrideTeam(tid, e.target.value)}
+                            style={{ fontSize: 11, background: '#222', color: '#fff', border: '1px solid #555', borderRadius: 3 }}
+                          >
+                            <option value="ellistown">Ellistown</option>
+                            <option value="opposition">Opposition</option>
+                            <option value="referee">Referee</option>
+                            <option value="ignore">Ignore</option>
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </details>
+      )}
 
       {/* Debug coordinate table */}
       <div className="debug-coordinates-panel">

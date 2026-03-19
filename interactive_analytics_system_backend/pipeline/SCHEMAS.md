@@ -127,3 +127,21 @@ Returned by `POST /videos/{id}/interpolate`.
 
 ## `PitchAnnotation` (legacy)
 `frame_idx: int` + `points: List[PitchPoint]` — defined but no longer used by any active endpoint. Kept in the file as a type reference.
+
+---
+
+## Team Classification
+
+### `VALID_TEAMS`
+```python
+VALID_TEAMS = {"ellistown", "opposition", "referee", "ignore"}
+```
+The set of accepted team strings for the PATCH endpoint. Validated in `override_team_classification` — any other value raises HTTP 400.
+
+### `TeamOverrideRequest`
+Request body for `PATCH /videos/{id}/classify-teams`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `track_id` | `int` | BotSort track ID to reassign |
+| `team` | `str` | New team string — must be one of `VALID_TEAMS` |

@@ -13,6 +13,7 @@ class VideoStore:
         self.v3_per_frame_H_cache: Dict[str, Dict[int, Any]] = {}
         self.v3_anchor_H_cache: Dict[str, Dict[int, Any]] = {}
         self.player_positions_cache: Dict[str, List[PlayerPitchPosition]] = {}
+        self.team_classifications_cache: Dict[str, Dict[int, dict]] = {}
 
 
 store = VideoStore()

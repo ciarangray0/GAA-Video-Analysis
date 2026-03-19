@@ -85,6 +85,9 @@ Homographies map directly from **image pixels → pitch-canvas pixels**. Meter v
 | GET | `/videos/{id}/homographies/anchor-quality` | Per-keypoint reprojection quality report |
 | POST | `/videos/{id}/interpolate` | Interpolate + smooth trajectories |
 | GET | `/videos/{id}/players` | All player positions (sparse + interpolated) |
+| POST | `/videos/{id}/classify-teams` | Classify tracks as Ellistown/opposition by jersey colour |
+| GET | `/videos/{id}/classify-teams` | Return stored team classifications |
+| PATCH | `/videos/{id}/classify-teams` | Override a single track's team assignment |
 
 ---
 
@@ -92,14 +95,15 @@ Homographies map directly from **image pixels → pitch-canvas pixels**. Meter v
 
 ```python
 class VideoStore:
-    videos:                   Dict[str, dict]                    # video metadata keyed by UUID
-    detections_cache:         Dict[str, List[Detection]]         # raw YOLO detections
-    v3_anchor_H_cache:        Dict[str, Dict[int, np.ndarray]]   # anchor frame Hs (keyed by frame_idx)
-    v3_per_frame_H_cache:     Dict[str, Dict[int, np.ndarray]]   # propagated per-frame Hs
-    player_positions_cache:   Dict[str, List[PlayerPitchPosition]] # mapped + interpolated positions
+    videos:                      Dict[str, dict]                       # video metadata keyed by UUID
+    detections_cache:            Dict[str, List[Detection]]            # raw YOLO detections
+    v3_anchor_H_cache:           Dict[str, Dict[int, np.ndarray]]      # anchor frame Hs (keyed by frame_idx)
+    v3_per_frame_H_cache:        Dict[str, Dict[int, np.ndarray]]      # propagated per-frame Hs
+    player_positions_cache:      Dict[str, List[PlayerPitchPosition]]  # mapped + interpolated positions
+    team_classifications_cache:  Dict[str, Dict[int, dict]]            # jersey-colour team classifications
 ```
 
-All five dicts are keyed by `video_id` (UUID string). On restart the `videos` dict is repopulated from disk (`_restore_videos_from_disk`); the other caches start empty and are lazily reloaded from disk when needed.
+All six dicts are keyed by `video_id` (UUID string). On restart the `videos` dict is repopulated from disk (`_restore_videos_from_disk`); the other caches start empty and are lazily reloaded from disk when needed.
 
 ---
 
@@ -113,7 +117,8 @@ data/
   tracks/
     {id}.json           ← list of Detection dicts
   annotations/
-    {id}_annotations.json       ← user keypoints + line annotations per frame
+    {id}_annotations.json              ← user keypoints + line annotations per frame
     {id}_v3_anchor_homographies.json   ← anchor Hs (str(frame_idx) → 3×3 list)
     {id}_v3_homographies.json          ← per-frame Hs (str(frame_idx) → 3×3 list)
+    {id}_team_classifications.json     ← jersey-colour classifications (str(track_id) → {team, confidence, mean_hsv})
 ```

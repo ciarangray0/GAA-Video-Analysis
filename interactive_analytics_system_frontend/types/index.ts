@@ -41,3 +41,27 @@ export interface AnchorFrame {
   points: PitchPoint[]
   lines: LineAnnotation[]
 }
+
+export type TeamName = 'ellistown' | 'opposition' | 'referee' | 'ignore'
+
+export interface TrackClassification {
+  team: TeamName
+  confidence: number
+  mean_hsv: [number, number, number]
+}
+
+export type TeamClassifications = Record<string, TrackClassification>
+
+export interface ClassifyTeamsSummary {
+  num_ellistown: number
+  num_opposition: number
+  num_referee: number
+  mean_confidence: number
+  low_confidence_tracks: number[]
+  hsv_cluster_separation: number | null
+}
+
+export interface ClassifyTeamsResponse {
+  classifications: TeamClassifications
+  summary: ClassifyTeamsSummary
+}

@@ -23,8 +23,10 @@ app.py
  ├── pipeline.constrained_homography (build_optical_flow_per_frame_H)
  ├── pipeline.map_players     (filter_detections_for_mapping, map_players_to_pitch)
  │    └── pipeline.homography (map_pixel_to_pitch)
- └── pipeline.trajectories    (interpolate_trajectories)
-      └── pipeline.config      (OUT_W, OUT_H for canvas clipping)
+ ├── pipeline.trajectories    (interpolate_trajectories)
+ │    └── pipeline.config      (OUT_W, OUT_H for canvas clipping)
+ └── pipeline.team_classifier (classify_tracks, override_classification)
+      └── pipeline.schemas     (Detection)
 ```
 
 ---
@@ -35,7 +37,7 @@ app.py
 |--------|-------------|
 | `config.py` | Canvas size constants, model path, tracking confidence |
 | `gaa_pitch_config.py` | All pitch geometry: vertices, horizontal lines, vertical sidelines |
-| `schemas.py` | Pydantic models: annotations in, positions + detections out |
+| `schemas.py` | Pydantic models: annotations in, positions + detections out; team override request |
 | `video.py` | OpenCV wrappers: metadata extraction, single-frame extraction |
 | `rendering.py` | `warp_frame` — `cv2.warpPerspective` wrapper |
 | `detect.py` | `run_tracking` — dispatches to remote GPU or local CPU |
@@ -44,6 +46,7 @@ app.py
 | `constrained_homography.py` | `build_optical_flow_per_frame_H` — LK flow, drift correction, SG smoothing |
 | `map_players.py` | Filter ball/referee, map bottom-centre of each bbox through per-frame H |
 | `trajectories.py` | Linear interp → Savitzky-Golay → max-velocity clamp → canvas clip |
+| `team_classifier.py` | Jersey-colour HSV analysis; classifies each track as Ellistown or opposition |
 
 ---
 
@@ -78,6 +81,8 @@ All frame indices are 0-based integers. Dictionaries keyed by frame index use `i
                    → List[PlayerPitchPosition]  (sparse, one per detection)
 6. trajectories.py interpolate_trajectories
                    → List[PlayerPitchPosition]  (dense, every frame in range)
+7. team_classifier.py  classify_tracks            (optional, post-processing)
+                       → Dict[track_id, {team, confidence, mean_hsv}]
 ```
 
-Steps 3 and 4 are triggered together by the `POST /homographies/v3` endpoint. Steps 5 and 6 are separate endpoints called in order by the frontend.
+Steps 3 and 4 are triggered together by the `POST /homographies/v3` endpoint. Steps 5 and 6 are separate endpoints called in order by the frontend. Step 7 is an independent optional step triggered by the "Classify Teams" button in the frontend — it does not depend on the trajectory data and can be run at any point after tracking.

@@ -1,4 +1,4 @@
-import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation } from '../types'
+import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications } from '../types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -88,6 +88,40 @@ export async function getPlayerPositions(videoId: string): Promise<PlayerPositio
     throw new Error(err.detail || 'Failed to fetch player positions')
   }
   return res.json()
+}
+
+export async function classifyTeams(videoId: string): Promise<ClassifyTeamsResponse> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/classify-teams`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Team classification failed')
+  }
+  return res.json()
+}
+
+export async function getTeamClassifications(videoId: string): Promise<TeamClassifications> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/classify-teams`)
+  if (!res.ok) return {}
+  const data = await res.json()
+  return data.classifications ?? {}
+}
+
+export async function overrideTeamClassification(
+  videoId: string,
+  trackId: number,
+  team: string,
+): Promise<TeamClassifications> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/classify-teams`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ track_id: trackId, team }),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Override failed')
+  }
+  const data = await res.json()
+  return data.classifications ?? {}
 }
 
 export { API_URL }

@@ -216,3 +216,38 @@ Query params:
 
 ### `GET /videos/{video_id}/players` → `List[PlayerPitchPosition]`
 Return all player positions (sparse + interpolated), sorted by `(frame_idx, track_id)`. Raises 404 if no positions exist.
+
+---
+
+### `POST /videos/{video_id}/classify-teams` → dict
+Classify player tracks as `'ellistown'` or `'opposition'` using jersey colour analysis.
+
+1. Loads detections from cache or disk. Raises 400 if no detections exist (run tracking first).
+2. Filters detections to player tracks only via `filter_detections_for_mapping`.
+3. Calls `classify_tracks(video_path, player_detections)` in a thread (`asyncio.to_thread`). This samples up to 30 frames per track, extracts the jersey HSV colour from the top 50% of each bounding box, and classifies based on Ellistown yellow fraction (see `TEAM_CLASSIFIER.md`).
+4. Stores result in `store.team_classifications_cache` and persists to `{video_id}_team_classifications.json`.
+5. Computes a summary:
+   - `num_ellistown`, `num_opposition` — track counts per team.
+   - `num_referee` — always 0 (referees are filtered before classification).
+   - `mean_confidence` — average classification confidence across all tracks.
+   - `low_confidence_tracks` — list of track IDs with `confidence < 0.6`.
+   - `hsv_cluster_separation` — Euclidean norm of the difference between the mean HSV of Ellistown tracks and opposition tracks (`None` if either group is empty).
+6. Returns `{"classifications": {str(track_id): {team, confidence, mean_hsv}}, "summary": {...}}`.
+
+---
+
+### `GET /videos/{video_id}/classify-teams` → dict
+Return stored team classifications for a video. Tries memory cache first, then disk. Raises 404 if no classifications exist. Returns `{"classifications": {str(track_id): {team, confidence, mean_hsv}}}`.
+
+---
+
+### `POST /videos/{video_id}/classify-teams` body / `PATCH /videos/{video_id}/classify-teams` → dict
+Override the team assignment for a single track.
+
+Request body (`TeamOverrideRequest`):
+| Field | Type | Description |
+|-------|------|-------------|
+| `track_id` | `int` | The track to reassign |
+| `team` | `str` | One of `"ellistown"`, `"opposition"`, `"referee"`, `"ignore"` |
+
+Raises 400 if `team` is not in `VALID_TEAMS`. Merges the override into the existing classification dict, persists to disk, and returns the full updated `{"classifications": {...}}` dict.

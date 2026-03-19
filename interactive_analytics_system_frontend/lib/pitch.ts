@@ -1,4 +1,4 @@
-import type { AnchorFrame, PlayerPosition } from '../types'
+import type { AnchorFrame, PlayerPosition, TeamClassifications } from '../types'
 import {
   PITCH_DISPLAY_WIDTH,
   PITCH_DISPLAY_HEIGHT,
@@ -154,10 +154,35 @@ export function drawPitchDiagram(
   }
 }
 
+/** Convert OpenCV HSV (H 0-179, S 0-255, V 0-255) to a CSS rgb() string. */
+function hsvToCss(h_cv: number, s_cv: number, v_cv: number): string {
+  const h = (h_cv * 2) / 360
+  const s = s_cv / 255
+  const v = v_cv / 255
+  const i = Math.floor(h * 6)
+  const f = h * 6 - i
+  const p = v * (1 - s)
+  const q = v * (1 - f * s)
+  const t = v * (1 - (1 - f) * s)
+  let r: number, g: number, b: number
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break
+    case 1: r = q; g = v; b = p; break
+    case 2: r = p; g = v; b = t; break
+    case 3: r = p; g = q; b = v; break
+    case 4: r = t; g = p; b = v; break
+    default: r = v; g = p; b = q; break
+  }
+  return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`
+}
+
+export { hsvToCss }
+
 export function drawPitch(
   canvas: HTMLCanvasElement,
   positions: PlayerPosition[],
   frame: number,
+  teamClassifications?: TeamClassifications,
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -229,16 +254,7 @@ export function drawPitch(
   ctx.moveTo(boxSL, H);  ctx.lineTo(boxSL, ySBot); ctx.lineTo(boxSR, ySBot); ctx.lineTo(boxSR, H)
   ctx.stroke()
 
-  // Filter out tracks present for fewer than 30 frames (~1 second at ~30fps)
-  const MIN_TRACK_FRAMES = 30
-  const trackFrameCounts = new Map<number, number>()
-  for (const p of positions) {
-    trackFrameCounts.set(p.track_id, (trackFrameCounts.get(p.track_id) ?? 0) + 1)
-  }
-  const validTrackIds = new Set<number>()
-  trackFrameCounts.forEach((count, id) => {
-    if (count >= MIN_TRACK_FRAMES) validTrackIds.add(id)
-  })
+  const validTrackIds = new Set(positions.map(p => p.track_id))
 
   const framePositions = positions.filter(p => p.frame_idx === frame && validTrackIds.has(p.track_id))
   const activeTrackIds = new Set(framePositions.map(p => p.track_id))
@@ -250,7 +266,16 @@ export function drawPitch(
     console.warn(`Frame ${frame}: ${outOfBounds.length} out-of-bounds positions:`, outOfBounds)
   }
 
-  const getPlayerColor = (trackId: number): string => `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
+  // Returns the dot colour for a track, or null if the track should be hidden.
+  const getPlayerColor = (trackId: number): string | null => {
+    if (teamClassifications) {
+      const cls = teamClassifications[trackId.toString()]
+      if (cls?.team === 'referee' || cls?.team === 'ignore') return null
+      if (cls?.team === 'ellistown') return '#FFD700'
+      if (cls?.team === 'opposition') return '#4488FF'
+    }
+    return `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
+  }
 
   // For each track that has been seen at some point up to this frame but is
   // not active now, find its most recent position and draw a grey ghost dot.
@@ -268,6 +293,7 @@ export function drawPitch(
   // Draw ghost dots first (underneath active dots)
   lastKnownByTrack.forEach((pos, trackId) => {
     if (activeTrackIds.has(trackId)) return  // active — drawn below
+    if (getPlayerColor(trackId) === null) return  // referee/ignore — hidden
     const x = (pos.x_pitch / PITCH_CANVAS_W) * W
     const y = (pos.y_pitch / PITCH_CANVAS_H) * H
     const clampedX = Math.max(padding, Math.min(W - padding, x))
@@ -290,6 +316,9 @@ export function drawPitch(
 
   // Draw active players on top
   framePositions.forEach((pos) => {
+    const color = getPlayerColor(pos.track_id)
+    if (color === null) return  // referee/ignore — hidden
+
     const x = (pos.x_pitch / PITCH_CANVAS_W) * W
     const y = (pos.y_pitch / PITCH_CANVAS_H) * H
     const isOutOfBounds =
@@ -298,7 +327,7 @@ export function drawPitch(
     const clampedX = Math.max(padding, Math.min(W - padding, x))
     const clampedY = Math.max(padding, Math.min(H - padding, y))
 
-    ctx.fillStyle = getPlayerColor(pos.track_id)
+    ctx.fillStyle = color
     ctx.beginPath()
     ctx.arc(clampedX, clampedY, 8, 0, 2 * Math.PI)
     ctx.fill()

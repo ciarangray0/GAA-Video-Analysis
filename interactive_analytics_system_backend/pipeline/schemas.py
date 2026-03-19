@@ -108,3 +108,12 @@ class InterpolationResponse(BaseModel):
     method: str
 
 
+VALID_TEAMS = {"ellistown", "opposition", "referee", "ignore"}
+
+
+class TeamOverrideRequest(BaseModel):
+    """Request body for overriding a track's team assignment."""
+    track_id: int
+    team: str
+
+

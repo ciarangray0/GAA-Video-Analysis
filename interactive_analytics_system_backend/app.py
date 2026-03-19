@@ -26,6 +26,8 @@ from pipeline.schemas import (
     Detection,
     PlayerPitchPosition,
     AnchorFrameAnnotation,
+    TeamOverrideRequest,
+    VALID_TEAMS,
 )
 # NOTE: `run_tracking` performs heavy ML imports; imported lazily inside endpoint.
 from pipeline.homography import resolve_pitch_coordinates
@@ -170,6 +172,11 @@ def save_annotations(video_id: str, annotations_dict: dict) -> None:
 
 def load_annotations(video_id: str) -> Optional[dict]:
     data = _load_json(ANNOTATIONS_DIR / f"{video_id}_annotations.json")
+    return {int(k): v for k, v in data.items()} if data is not None else None
+
+
+def _load_team_classifications(video_id: str) -> Optional[Dict[int, dict]]:
+    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_team_classifications.json")
     return {int(k): v for k, v in data.items()} if data is not None else None
 
 
@@ -338,10 +345,23 @@ async def get_warped_frame_any(
         _draw_reference_lines(warped)
 
         if players:
+            classifications = (
+                store.team_classifications_cache.get(video_id)
+                or _load_team_classifications(video_id)
+                or {}
+            )
             for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
+                team = classifications.get(pos.track_id, {}).get("team", "")
+                if team in ("referee", "ignore"):
+                    continue
                 x, y = int(pos.x_pitch), int(pos.y_pitch)
                 if 0 <= x < OUT_W and 0 <= y < OUT_H:
-                    color = (0, 0, 255) if pos.track_id % 2 == 0 else (255, 0, 0)
+                    if team == "ellistown":
+                        color = (0, 210, 255)   # yellow in BGR
+                    elif team == "opposition":
+                        color = (220, 80, 50)   # blue in BGR
+                    else:
+                        color = (0, 0, 255)     # default red (unclassified)
                     cv2.circle(warped, (x, y), 8, color, -1)
                     cv2.putText(warped, str(pos.track_id), (x + 10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -737,5 +757,113 @@ async def get_player_positions(video_id: str):
         raise HTTPException(status_code=404, detail="No player positions found. Run map_players first.")
 
     return sorted(positions, key=lambda p: (p.frame_idx, p.track_id))
+
+
+# --- Team Classification ---
+
+@app.post("/videos/{video_id}/classify-teams")
+async def classify_teams(video_id: str):
+    """Classify player tracks into teams by jersey colour analysis.
+
+    Samples video frames for each track, extracts the jersey HSV colour,
+    and assigns 'ellistown' (yellow jersey) or 'opposition'.
+    Returns per-track classifications plus a summary with cluster statistics.
+    """
+    from pipeline.team_classifier import classify_tracks
+
+    video_info = _get_video_or_404(video_id)
+
+    detections = store.detections_cache.get(video_id) or load_detections(video_id)
+    if detections is None:
+        raise HTTPException(status_code=400, detail="No detections found. Run tracking first.")
+
+    player_detections = filter_detections_for_mapping(detections)
+
+    try:
+        classifications = await asyncio.to_thread(
+            classify_tracks, video_info["path"], player_detections
+        )
+    except Exception as e:
+        logger.error(f"Team classification failed for video {video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Team classification failed: {str(e)}")
+
+    store.team_classifications_cache[video_id] = classifications
+    _save_json(
+        ANNOTATIONS_DIR / f"{video_id}_team_classifications.json",
+        {str(k): v for k, v in classifications.items()},
+    )
+
+    confidences = [v["confidence"] for v in classifications.values()]
+    ellistown_ids = [tid for tid, v in classifications.items() if v["team"] == "ellistown"]
+    opposition_ids = [tid for tid, v in classifications.items() if v["team"] == "opposition"]
+    low_conf_ids = [tid for tid, v in classifications.items() if v["confidence"] < 0.6]
+
+    hsv_separation = None
+    if ellistown_ids and opposition_ids:
+        ell_mean = np.mean([classifications[tid]["mean_hsv"] for tid in ellistown_ids], axis=0)
+        opp_mean = np.mean([classifications[tid]["mean_hsv"] for tid in opposition_ids], axis=0)
+        hsv_separation = round(float(np.linalg.norm(ell_mean - opp_mean)), 2)
+
+    logger.info(
+        f"Team classification for {video_id}: {len(ellistown_ids)} ellistown, "
+        f"{len(opposition_ids)} opposition, separation={hsv_separation}"
+    )
+
+    return {
+        "classifications": {str(k): v for k, v in classifications.items()},
+        "summary": {
+            "num_ellistown": len(ellistown_ids),
+            "num_opposition": len(opposition_ids),
+            "num_referee": 0,
+            "mean_confidence": round(float(np.mean(confidences)) if confidences else 0.0, 3),
+            "low_confidence_tracks": low_conf_ids,
+            "hsv_cluster_separation": hsv_separation,
+        },
+    }
+
+
+@app.get("/videos/{video_id}/classify-teams")
+async def get_team_classifications(video_id: str):
+    """Return stored team classifications for a video."""
+    _get_video_or_404(video_id)
+
+    classifications = (
+        store.team_classifications_cache.get(video_id)
+        or _load_team_classifications(video_id)
+    )
+    if classifications is None:
+        raise HTTPException(status_code=404, detail="No team classifications found. Run classify-teams first.")
+
+    return {"classifications": {str(k): v for k, v in classifications.items()}}
+
+
+@app.patch("/videos/{video_id}/classify-teams")
+async def override_team_classification(video_id: str, body: TeamOverrideRequest):
+    """Override a single track's team assignment."""
+    from pipeline.team_classifier import override_classification
+
+    _get_video_or_404(video_id)
+
+    if body.team not in VALID_TEAMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"team must be one of: {', '.join(sorted(VALID_TEAMS))}",
+        )
+
+    classifications = (
+        store.team_classifications_cache.get(video_id)
+        or _load_team_classifications(video_id)
+        or {}
+    )
+
+    classifications = override_classification(classifications, body.track_id, body.team)
+    store.team_classifications_cache[video_id] = classifications
+    _save_json(
+        ANNOTATIONS_DIR / f"{video_id}_team_classifications.json",
+        {str(k): v for k, v in classifications.items()},
+    )
+
+    logger.info(f"Track {body.track_id} reassigned to '{body.team}' for video {video_id}")
+    return {"classifications": {str(k): v for k, v in classifications.items()}}
 
 

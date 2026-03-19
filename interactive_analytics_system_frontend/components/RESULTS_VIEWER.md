@@ -25,10 +25,13 @@ Displays the processed results: a side-by-side view of the original video and a 
 |-------|-------------|
 | `isPlaying` | Whether the RAF playback loop is active |
 | `playbackSpeed` | Current speed multiplier (0.25, 0.5, 1, 2, 4×) |
-| `isSyncMode` | When true, the video element is synced to `currentFrame` when not playing |
 | `showBotSortOverlay` | Toggle for the BotSort bounding-box overlay image |
 | `videoObjectUrl` | Blob URL created from `videoFile` |
 | `showMappingView` | Whether the warped-frame debug panel is open |
+| `teamClassifications` | `TeamClassifications` dict (track_id → `{team, confidence, mean_hsv}`) — empty until "Classify Teams" is run |
+| `classifySummary` | `ClassifyTeamsSummary` from the most recent `POST /classify-teams` response, or `null` |
+| `isClassifying` | True while the classify-teams API call is in flight |
+| `classifyError` | Error string if the last classification attempt failed, otherwise `null` |
 
 ---
 
@@ -135,16 +138,16 @@ Cancels the RAF loop and pauses the video.
 
 ```typescript
 useEffect(() => {
-  if (!isPlaying && isSyncMode && video.readyState >= 2) {
+  if (!isPlaying && video.readyState >= 2) {
     const timeInSeconds = currentFrame / videoMetadata.fps
     if (Math.abs(video.currentTime - timeInSeconds) > 0.1) {
       video.currentTime = timeInSeconds
     }
   }
-}, [currentFrame, isPlaying, isSyncMode, ...])
+}, [currentFrame, isPlaying, ...])
 ```
 
-When not playing and sync mode is on, seeks the video to match `currentFrame`. The 0.1-second threshold prevents unnecessary seeks when the video is already close (small floating-point drift from the playback loop). Only runs when `readyState >= 2` (video has enough data to seek).
+When not playing, the video is always kept in sync with `currentFrame`. The 0.1-second threshold prevents unnecessary seeks when the video is already close (small floating-point drift from the playback loop). Only runs when `readyState >= 2` (video has enough data to seek). There is no user-togglable sync mode — sync is always active.
 
 ---
 
@@ -153,12 +156,12 @@ When not playing and sync mode is on, seeks the video to match `currentFrame`. T
 ```typescript
 useEffect(() => {
   if (canvasRef.current && playerPositions.length > 0) {
-    drawPitch(canvasRef.current, playerPositions, currentFrame)
+    drawPitch(canvasRef.current, playerPositions, currentFrame, teamClassifications)
   }
-}, [currentFrame, playerPositions])
+}, [currentFrame, playerPositions, teamClassifications])
 ```
 
-Redraws the entire pitch canvas whenever `currentFrame` changes. `drawPitch` is a pure function — see `lib/OVERVIEW.md` for its implementation.
+Redraws the entire pitch canvas whenever `currentFrame` or `teamClassifications` changes. `drawPitch` accepts an optional `teamClassifications` argument — when provided, dots are coloured by team (yellow for Ellistown, blue for opposition) rather than the default golden-angle HSL scheme. Tracks classified as `'referee'` or `'ignore'` are hidden. See `lib/OVERVIEW.md` for the full `drawPitch` implementation.
 
 ---
 
@@ -179,6 +182,34 @@ const isOutOfBounds = pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W || ...
 ```
 
 Out-of-bounds rows are highlighted in red. This was essential during development to diagnose homography and coordinate system bugs.
+
+---
+
+## Team Classification
+
+A "Classify Teams" button in the playback controls calls `classifyTeams(videoId)` (`POST /videos/{id}/classify-teams`). On mount, `getTeamClassifications(videoId)` (`GET /videos/{id}/classify-teams`) is called to restore any previously computed classifications.
+
+### `handleClassifyTeams()`
+
+Sets `isClassifying = true`, calls `classifyTeams`, stores the returned `classifications` and `summary` in state, then sets `isClassifying = false`. Errors are caught and stored in `classifyError`.
+
+### `handleOverrideTeam(trackId, team)`
+
+Calls `overrideTeamClassification(videoId, trackId, team)` (`PATCH /videos/{id}/classify-teams`) and updates `teamClassifications` with the returned classifications dict.
+
+### Pitch Legend
+
+Below the pitch canvas, a legend is shown:
+- When `teamClassifications` is non-empty: three coloured dots labelled "Ellistown" (gold), "Opposition" (blue), "Unclassified" (grey).
+- When empty: "Each player has a unique color based on their track ID".
+
+### Team Classification Panel
+
+An expandable `<details>` panel (open by default when data is present) appears below the player list. It shows:
+- Summary stats: Ellistown count, opposition count, average confidence, HSV cluster separation, and a list of low-confidence track IDs (confidence < 0.6).
+- Per-team groups (`ellistown`, `opposition`, `referee`, `ignore`), each showing track ID badges with a jersey-colour swatch, a confidence bar, and a team assignment dropdown (`<select>`). Changing the dropdown calls `handleOverrideTeam` immediately.
+
+The jersey-colour swatch uses `hsvToCss(h, s, v)` from `lib/pitch.ts` to convert OpenCV HSV (H 0–179, S/V 0–255) to a CSS `rgb()` string.
 
 ---
 

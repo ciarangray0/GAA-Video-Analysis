@@ -12,7 +12,7 @@ A Next.js single-page application that guides the user through a five-step pipel
 | **2. Configure** | Inline in `index.tsx` | User picks an anchor frame interval (0.5s–10s). `generateAnchorFrames` creates the frame list. Saved annotations from a previous session are offered for restoration. |
 | **3. Annotate** | `AnchorFrameAnnotator` | For each anchor frame: user clicks pitch keypoints and/or line segments. Annotations auto-saved to `localStorage`. |
 | **4. Pipeline** | `PipelineSteps` | Steps A–D: tracking → homography → player mapping → interpolation. Each step calls one or more backend API endpoints. |
-| **5. Results** | `ResultsViewer` | Side-by-side video + 2D pitch canvas. Playback at adjustable speeds, frame-by-frame stepping, BotSort overlay toggle. |
+| **5. Results** | `ResultsViewer` | Side-by-side video + 2D pitch canvas. Playback at adjustable speeds, frame-by-frame stepping, BotSort overlay toggle, and team classification (jersey-colour analysis with per-track override). |
 
 ---
 
