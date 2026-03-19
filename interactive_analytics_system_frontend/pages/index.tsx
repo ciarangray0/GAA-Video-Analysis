@@ -36,7 +36,6 @@ export default function Home() {
   const debugLog = useRef<string[]>([])
   const [debugLogEntries, setDebugLogEntries] = useState<string[]>([])
 
-  // Keep stepDoneRef in sync so annotation changes can check which steps are done
   useEffect(() => { stepDoneRef.current.B = stepBResult !== null }, [stepBResult])
   useEffect(() => { stepDoneRef.current.C = stepCResult !== null }, [stepCResult])
   useEffect(() => { stepDoneRef.current.D = stepDResult !== null }, [stepDResult])
@@ -54,7 +53,6 @@ export default function Home() {
     setDebugLogEntries([...debugLog.current])
   }
 
-  // Mark downstream pipeline steps stale when annotations change
   const handleAnchorFramesChange = (frames: AnchorFrame[]) => {
     setAnchorFrames(frames)
     const { B, C, D } = stepDoneRef.current
@@ -110,125 +108,153 @@ export default function Home() {
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <div className="container">
-        <h1>GAA Video Analysis System</h1>
+        <h1>GAA Video Analysis</h1>
+        <div className="app-layout">
+          <div className="main-content">
 
-        <VideoUploader
-          onUploadSuccess={(metadata, file) => {
-            setVideoMetadata(metadata)
-            setVideoFile(file)
-            setAnchorFrames([])
-            setError('')
-            setStatus('Video uploaded successfully!')
-          }}
-        />
-
-        {/* Step 2: Configure Anchor Frames */}
-        {videoMetadata && anchorFrames.length === 0 && (
-          <div className="config-section">
-            <h2>2. Configure Anchor Frames</h2>
-            <p>Set up which frames to use for pitch annotations.</p>
-            <div className="config-form">
-              <div className="config-row">
-                <label>
-                  Anchor Frame Interval (seconds):
-                  <select value={anchorInterval} onChange={(e) => setAnchorInterval(parseFloat(e.target.value))}>
-                    <option value={0.5}>Every 0.5 seconds</option>
-                    <option value={1}>Every 1 second</option>
-                    <option value={2}>Every 2 seconds</option>
-                    <option value={5}>Every 5 seconds</option>
-                    <option value={10}>Every 10 seconds</option>
-                  </select>
-                </label>
-              </div>
-              <div className="config-preview">
-                <p>
-                  This will generate approximately{' '}
-                  <strong>{Math.ceil(videoMetadata.duration_seconds / anchorInterval)}</strong>{' '}
-                  anchor frames to annotate.
-                </p>
-              </div>
-              <button onClick={generateAnchorFrames}>Generate Anchor Frames</button>
+            {/* Step 1: Upload */}
+            <div className="step-card">
+              <span className="step-card__badge">1</span>
+              <span className="step-card__title">Upload Video</span>
+              <VideoUploader
+                onUploadSuccess={(metadata, file) => {
+                  setVideoMetadata(metadata)
+                  setVideoFile(file)
+                  setAnchorFrames([])
+                  setError('')
+                  setStatus('Video uploaded successfully!')
+                }}
+              />
             </div>
-          </div>
-        )}
 
-        {/* Step 3: Annotate + Pipeline */}
-        {anchorFrames.length > 0 && videoMetadata && (
-          <>
-            <AnchorFrameAnnotator
+            {/* Step 2: Configure Anchor Frames */}
+            {videoMetadata && anchorFrames.length === 0 && (
+              <div className="step-card">
+                <span className="step-card__badge">2</span>
+                <span className="step-card__title">Configure Anchor Frames</span>
+                <div className="config-section">
+                  <p>Set up which frames to use for pitch annotations.</p>
+                  <div className="config-form">
+                    <div className="config-row">
+                      <label>
+                        Anchor Frame Interval (seconds):
+                        <select value={anchorInterval} onChange={(e) => setAnchorInterval(parseFloat(e.target.value))}>
+                          <option value={0.5}>Every 0.5 seconds</option>
+                          <option value={1}>Every 1 second</option>
+                          <option value={2}>Every 2 seconds</option>
+                          <option value={5}>Every 5 seconds</option>
+                          <option value={10}>Every 10 seconds</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="config-preview">
+                      <p>
+                        This will generate approximately{' '}
+                        <strong>{Math.ceil(videoMetadata.duration_seconds / anchorInterval)}</strong>{' '}
+                        anchor frames to annotate.
+                      </p>
+                    </div>
+                    <button onClick={generateAnchorFrames}>Generate Anchor Frames</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: Annotate */}
+            {anchorFrames.length > 0 && videoMetadata && (
+              <>
+                <div className="step-card">
+                  <span className="step-card__badge">3</span>
+                  <span className="step-card__title">Annotate Frames</span>
+                  <AnchorFrameAnnotator
+                    videoMetadata={videoMetadata}
+                    videoFilename={videoFile?.name}
+                    anchorFrames={anchorFrames}
+                    currentAnchorIdx={currentAnchorIdx}
+                    onAnchorFramesChange={handleAnchorFramesChange}
+                    onCurrentIdxChange={setCurrentAnchorIdx}
+                  />
+                </div>
+
+                {/* Step 4: Pipeline */}
+                <div className="step-card">
+                  <span className="step-card__badge">4</span>
+                  <span className="step-card__title">Run Pipeline</span>
+                  <PipelineSteps
+                    videoMetadata={videoMetadata}
+                    anchorFrames={anchorFrames}
+                    stepAResult={stepAResult}
+                    stepBResult={stepBResult}
+                    stepCResult={stepCResult}
+                    stepDResult={stepDResult}
+                    staleSteps={staleSteps}
+                    runningSteps={runningSteps}
+                    onStepAComplete={(result) => setStepAResult(result)}
+                    onStepBComplete={(result, frames) => { setStepBResult(result); setHomographyFrameIndices(frames) }}
+                    onStepCComplete={(result) => setStepCResult(result)}
+                    onStepDComplete={(result, positions, start, end, fps) => {
+                      setStepDResult(result)
+                      setPlayerPositions(positions)
+                      setProcessedStartFrame(start)
+                      setProcessedEndFrame(end)
+                      setProcessedFps(fps)
+                      const firstFrame = positions.length > 0 ? Math.min(...positions.map(p => p.frame_idx)) : start
+                      setCurrentFrame(firstFrame)
+                    }}
+                    onStepsMarkedStale={markStale}
+                    onStepsClearedStale={clearStale}
+                    onRunningStepChange={(step, action) => {
+                      setRunningSteps(prev => {
+                        const next = new Set(prev)
+                        if (action === 'add') next.add(step)
+                        else next.delete(step)
+                        return next
+                      })
+                    }}
+                    onError={setError}
+                    onStatusChange={setStatus}
+                    logApiCall={logApiCall}
+                  />
+                </div>
+              </>
+            )}
+
+            {(status || error) && (
+              <div className={`status ${error ? 'error' : 'success'}`}>{error || status}</div>
+            )}
+
+            {/* Step 5: Results */}
+            {playerPositions.length > 0 && videoMetadata && videoFile && (
+              <div className="step-card">
+                <span className="step-card__badge">5</span>
+                <span className="step-card__title">Results</span>
+                <ResultsViewer
+                  videoMetadata={videoMetadata}
+                  videoFile={videoFile}
+                  playerPositions={playerPositions}
+                  currentFrame={currentFrame}
+                  onFrameChange={setCurrentFrame}
+                  processedStartFrame={processedStartFrame}
+                  processedEndFrame={processedEndFrame}
+                  homographyFrameIndices={homographyFrameIndices}
+                  processedFps={processedFps}
+                />
+              </div>
+            )}
+
+          </div>
+          <div className="activity-sidebar">
+            <DebugLog
+              entries={debugLogEntries}
+              onClear={() => { debugLog.current = []; setDebugLogEntries([]) }}
               videoMetadata={videoMetadata}
-              videoFilename={videoFile?.name}
-              anchorFrames={anchorFrames}
-              currentAnchorIdx={currentAnchorIdx}
-              onAnchorFramesChange={handleAnchorFramesChange}
-              onCurrentIdxChange={setCurrentAnchorIdx}
-            />
-            <PipelineSteps
-              videoMetadata={videoMetadata}
-              anchorFrames={anchorFrames}
               stepAResult={stepAResult}
               stepBResult={stepBResult}
               stepCResult={stepCResult}
               stepDResult={stepDResult}
-              staleSteps={staleSteps}
-              runningSteps={runningSteps}
-              onStepAComplete={(result) => setStepAResult(result)}
-              onStepBComplete={(result, frames) => { setStepBResult(result); setHomographyFrameIndices(frames) }}
-              onStepCComplete={(result) => setStepCResult(result)}
-              onStepDComplete={(result, positions, start, end, fps) => {
-                setStepDResult(result)
-                setPlayerPositions(positions)
-                setProcessedStartFrame(start)
-                setProcessedEndFrame(end)
-                setProcessedFps(fps)
-                const firstFrame = positions.length > 0 ? Math.min(...positions.map(p => p.frame_idx)) : start
-                setCurrentFrame(firstFrame)
-              }}
-              onStepsMarkedStale={markStale}
-              onStepsClearedStale={clearStale}
-              onRunningStepChange={(step, action) => {
-                setRunningSteps(prev => {
-                  const next = new Set(prev)
-                  if (action === 'add') next.add(step)
-                  else next.delete(step)
-                  return next
-                })
-              }}
-              onError={setError}
-              onStatusChange={setStatus}
-              logApiCall={logApiCall}
             />
-          </>
-        )}
-
-        {(status || error) && (
-          <div className={`status ${error ? 'error' : 'success'}`}>{error || status}</div>
-        )}
-
-        {/* Step 4: Results */}
-        {playerPositions.length > 0 && videoMetadata && videoFile && (
-          <ResultsViewer
-            videoMetadata={videoMetadata}
-            videoFile={videoFile}
-            playerPositions={playerPositions}
-            currentFrame={currentFrame}
-            onFrameChange={setCurrentFrame}
-            processedStartFrame={processedStartFrame}
-            processedEndFrame={processedEndFrame}
-            homographyFrameIndices={homographyFrameIndices}
-            processedFps={processedFps}
-          />
-        )}
-
-        <DebugLog
-          entries={debugLogEntries}
-          onClear={() => { debugLog.current = []; setDebugLogEntries([]) }}
-          videoMetadata={videoMetadata}
-          stepAResult={stepAResult}
-          stepBResult={stepBResult}
-          stepCResult={stepCResult}
-          stepDResult={stepDResult}
-        />
+          </div>
+        </div>
       </div>
     </>
   )

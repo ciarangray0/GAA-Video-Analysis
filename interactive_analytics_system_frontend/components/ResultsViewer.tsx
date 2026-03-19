@@ -109,14 +109,25 @@ export default function ResultsViewer({
   const startPlayback = useCallback(() => {
     const video = videoPlayerRef.current
     if (!video || playerPositions.length === 0) return
-    setIsPlaying(true)
     video.playbackRate = playbackSpeed
     const fps = processedFps || videoMetadata.fps || 25
     const startTime = processedStartFrame / fps
-    if (video.currentTime < startTime) video.currentTime = startTime
-    video.play().catch(err => console.warn('Autoplay blocked:', err))
-    animFrameRef.current = requestAnimationFrame(onPlaybackFrame)
-  }, [playbackSpeed, playerPositions.length, processedFps, processedStartFrame, videoMetadata.fps, onPlaybackFrame])
+    // Reset to start if video has ended or is past the end; also honour startTime
+    if (video.ended || video.currentTime >= processedEndFrame / fps) {
+      video.currentTime = startTime
+    } else if (video.currentTime < startTime) {
+      video.currentTime = startTime
+    }
+    setIsPlaying(true)
+    video.play()
+      .then(() => {
+        animFrameRef.current = requestAnimationFrame(onPlaybackFrame)
+      })
+      .catch(err => {
+        console.warn('Playback blocked:', err)
+        setIsPlaying(false)
+      })
+  }, [playbackSpeed, playerPositions.length, processedFps, processedStartFrame, processedEndFrame, videoMetadata.fps, onPlaybackFrame])
 
   const togglePlayback = useCallback(() => {
     isPlaying ? stopPlayback() : startPlayback()

@@ -308,6 +308,19 @@ export default function PipelineSteps({
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
             <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
 
+            {/* Failed frames */}
+            {(() => {
+              const failed = Object.entries(stepBResult.info)
+                .filter(([, v]) => v.quality === 'bad')
+                .sort(([a], [b]) => Number(a) - Number(b))
+              return failed.length > 0 ? (
+                <p style={{ color: '#cc2222', margin: '4px 0' }}>
+                  ⚠️ {failed.length} frame{failed.length > 1 ? 's' : ''} rejected:{' '}
+                  {failed.map(([f, v]) => `${f} (${v.error ?? 'unknown'})`).join(', ')}
+                </p>
+              ) : null
+            })()}
+
             {/* Per-anchor summary table */}
             {Object.keys(stepBResult.info).length > 0 && (
               <table className="debug-table">

@@ -55,6 +55,11 @@ class AnchorFrameAnnotation(BaseModel):
     lines: List[LineAnnotation] = []
 
 
+CLASS_PLAYER = "GAA-player-lablers"
+CLASS_BALL   = "Ball-labelers"
+CLASS_REFEREE = "Refree-lablers"
+
+
 class Detection(BaseModel):
     """Player detection from YOLO + ByteTrack."""
     frame_idx: int
@@ -64,6 +69,7 @@ class Detection(BaseModel):
     x2: float
     y2: float
     confidence: float
+    class_name: str = CLASS_PLAYER  # default keeps old saved JSON working
 
 
 class PlayerPitchPosition(BaseModel):

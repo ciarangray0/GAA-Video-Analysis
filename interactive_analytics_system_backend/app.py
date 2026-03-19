@@ -10,6 +10,8 @@ import json
 import cv2
 import numpy as np
 import logging
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +30,7 @@ from pipeline.schemas import (
 # NOTE: `run_tracking` performs heavy ML imports; imported lazily inside endpoint.
 from pipeline.homography import resolve_pitch_coordinates
 from pipeline.constrained_homography import build_optical_flow_per_frame_H
-from pipeline.map_players import map_players_to_pitch
+from pipeline.map_players import map_players_to_pitch, filter_detections_for_mapping
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
 from pipeline.gaa_pitch_config import GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
@@ -475,9 +477,16 @@ async def compute_homographies_v3(
         raise HTTPException(status_code=500, detail=f"v3 homography computation failed: {str(e)}")
 
     if not anchor_homographies:
+        frame_errors = {
+            str(k): v.get("error", "unknown") for k, v in computation_info.items()
+        }
+        logger.warning(f"v3: no valid homographies for {video_id}. Per-frame: {frame_errors}")
         raise HTTPException(
             status_code=400,
-            detail="No valid v3 homographies computed. Ensure at least one frame has line annotations."
+            detail=(
+                "No valid v3 homographies computed. Each annotated frame needs at least 4 keypoints. "
+                f"Per-frame errors: {frame_errors}"
+            ),
         )
 
     store.v3_anchor_H_cache[video_id] = anchor_homographies
@@ -554,6 +563,7 @@ async def map_players(video_id: str):
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
     try:
+        detections = filter_detections_for_mapping(detections)
         positions = map_players_to_pitch(
             detections, homographies,
             anchor_frame_indices=anchor_frame_indices,

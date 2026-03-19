@@ -65,7 +65,7 @@ class TrackVideoRequest(BaseModel):
     scaledown_window=60,  # Keep warm for 60 seconds (renamed from container_idle_timeout)
 )
 class YOLOTracker:
-    """YOLO + ByteTrack tracker running on GPU."""
+    """YOLO + BotSort tracker running on GPU."""
 
     @modal.enter()
     def load_model(self):
@@ -87,7 +87,7 @@ class YOLOTracker:
 
     def _run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
         """
-        Internal method to run YOLO + ByteTrack on video bytes.
+        Internal method to run YOLO + BotSort on video bytes.
 
         Args:
             video_bytes: Raw video file bytes
@@ -130,6 +130,7 @@ class YOLOTracker:
                 track_ids = track_ids.cpu().numpy().astype(int)
                 bboxes = boxes.xyxy.cpu().numpy()
                 confidences = boxes.conf.cpu().numpy()
+                cls_ids = boxes.cls.cpu().numpy().astype(int)
 
                 for i, track_id in enumerate(track_ids):
                     x1, y1, x2, y2 = bboxes[i]
@@ -141,6 +142,7 @@ class YOLOTracker:
                         "x2": float(x2),
                         "y2": float(y2),
                         "confidence": float(confidences[i]),
+                        "class_name": self.model.names.get(int(cls_ids[i]), "GAA-player-lablers"),
                     })
 
             print(f"Tracking complete: {len(detections)} detections across {frame_idx + 1} frames")

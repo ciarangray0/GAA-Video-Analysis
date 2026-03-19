@@ -6,11 +6,14 @@ Coordinate System:
 The pitch canvas is OUT_W × OUT_H pixels (850 × 1400).  Meters are never used
 after the destination points are set up.
 """
+import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from pipeline.config import OUT_H, OUT_W
 from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES, GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
@@ -237,6 +240,9 @@ def compute_homographies_with_lines_v3(
         lines = ann.get("lines", [])
 
         if len(keypoints) < 4:
+            logger.warning(
+                f"Frame {frame_idx}: skipped — only {len(keypoints)} keypoint(s), need ≥ 4"
+            )
             computation_info[frame_idx] = {
                 "error": f"Too few keypoints ({len(keypoints)} < 4)",
                 "quality": "bad",

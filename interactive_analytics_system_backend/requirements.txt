@@ -5,6 +5,7 @@ opencv-python-headless>=4.8.0  # Headless for server deployment
 scipy>=1.11.0  # Cubic spline interpolation and signal smoothing
 
 # API backend
+python-dotenv>=1.0.0  # Load .env file for local development
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6  # Required for file uploads
@@ -16,11 +17,4 @@ pydantic>=2.0.0
 # Video handling
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.9
-
-# Optional: Only needed if using local CPU fallback for YOLO tracking
-# Uncomment these if you want local fallback (adds ~500MB to deploy)
-# --extra-index-url https://download.pytorch.org/whl/cpu
-# torch>=2.0.0
-# torchvision>=0.15.0
-# ultralytics>=8.0.0
 

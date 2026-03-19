@@ -5,11 +5,47 @@ Coordinate System:
 - Input: Image pixels (camera frame from video)
 - Output: Pitch canvas pixels (e.g., 850 × 1400 fixed canvas)
 """
+import logging
+from collections import defaultdict
 from typing import List, Dict, Optional, Set
 import numpy as np
-
-from pipeline.schemas import Detection, PlayerPitchPosition
 from pipeline.homography import map_pixel_to_pitch
+
+from pipeline.schemas import Detection, PlayerPitchPosition, CLASS_BALL, CLASS_REFEREE
+
+logger = logging.getLogger(__name__)
+
+
+def filter_detections_for_mapping(detections: List[Detection]) -> List[Detection]:
+    """Drop ball detections and entire referee tracks before player mapping.
+
+    Rules:
+    - Any detection with class_name == CLASS_BALL is dropped outright.
+    - Any track_id that has at least one detection classified as CLASS_REFEREE
+      is considered a referee track; ALL detections for that track_id are dropped.
+
+    Returns the filtered list (players only).
+    """
+    # Collect track IDs that are ever labelled as referee
+    referee_track_ids: Set[int] = {
+        det.track_id for det in detections if det.class_name == CLASS_REFEREE
+    }
+
+    filtered = [
+        det for det in detections
+        if det.class_name != CLASS_BALL and det.track_id not in referee_track_ids
+    ]
+
+    n_ball = sum(1 for d in detections if d.class_name == CLASS_BALL)
+    n_ref_dets = sum(1 for d in detections if d.track_id in referee_track_ids)
+    logger.info(
+        f"Detection filter: {len(detections)} total → "
+        f"dropped {n_ball} ball, {n_ref_dets} referee dets "
+        f"({len(referee_track_ids)} referee track IDs: {sorted(referee_track_ids)}), "
+        f"{len(filtered)} remaining"
+    )
+
+    return filtered
 
 
 def map_players_to_pitch(
