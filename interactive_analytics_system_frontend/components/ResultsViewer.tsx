@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { VideoMetadata, PlayerPosition, TeamClassifications, TeamName, ClassifyTeamsSummary } from '../types'
+import type { VideoMetadata, PlayerPosition, TeamClassifications, TeamName, ClassifyTeamsSummary, KpiSummary } from '../types'
 import { drawPitch, hsvToCss } from '../lib/pitch'
 import { PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H } from '../lib/constants'
-import { API_URL, classifyTeams, getTeamClassifications, overrideTeamClassification } from '../lib/api'
+import { API_URL, classifyTeams, getTeamClassifications, overrideTeamClassification, computeKpis } from '../lib/api'
 
 
 interface ResultsViewerProps {
@@ -39,6 +39,17 @@ export default function ResultsViewer({
   const [isClassifying, setIsClassifying] = useState(false)
   const [classifyError, setClassifyError] = useState<string | null>(null)
 
+  // Clip mode
+  const [clipMode, setClipMode] = useState<'score' | 'defense'>('score')
+
+  // Trails toggle
+  const [showTrails, setShowTrails] = useState(false)
+
+  // KPI state
+  const [kpiSummary, setKpiSummary] = useState<KpiSummary | null>(null)
+  const [isComputingKpis, setIsComputingKpis] = useState(false)
+  const [kpiError, setKpiError] = useState<string | null>(null)
+
   // Debug panel state
   const [showMappingView, setShowMappingView] = useState(false)
 
@@ -74,6 +85,19 @@ export default function ResultsViewer({
     }
   }, [videoMetadata.video_id])
 
+  const handleComputeKpis = useCallback(async () => {
+    setIsComputingKpis(true)
+    setKpiError(null)
+    try {
+      const result = await computeKpis(videoMetadata.video_id)
+      setKpiSummary(result)
+    } catch (e: any) {
+      setKpiError(e.message || 'KPI computation failed')
+    } finally {
+      setIsComputingKpis(false)
+    }
+  }, [videoMetadata.video_id])
+
   const handleOverrideTeam = useCallback(async (trackId: number, team: string) => {
     try {
       const updated = await overrideTeamClassification(videoMetadata.video_id, trackId, team)
@@ -83,12 +107,12 @@ export default function ResultsViewer({
     }
   }, [videoMetadata.video_id])
 
-  // Redraw pitch when frame or classifications change
+  // Redraw pitch when frame, classifications, or trails toggle changes
   useEffect(() => {
     if (canvasRef.current && playerPositions.length > 0) {
-      drawPitch(canvasRef.current, playerPositions, currentFrame, teamClassifications)
+      drawPitch(canvasRef.current, playerPositions, currentFrame, teamClassifications, showTrails)
     }
-  }, [currentFrame, playerPositions, teamClassifications])
+  }, [currentFrame, playerPositions, teamClassifications, showTrails])
 
   const getFramesWithPositions = useCallback(() => {
     const frames = new Set(playerPositions.map(p => p.frame_idx))
@@ -198,7 +222,20 @@ export default function ResultsViewer({
 
   return (
     <div className="results-section">
-      <h2>4. Player Tracking Results</h2>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 24, flexWrap: 'wrap', marginBottom: 8 }}>
+        <h2 style={{ margin: 0 }}>4. Player Tracking Results</h2>
+        <fieldset style={{ border: '1px solid #444', borderRadius: 6, padding: '4px 12px', fontSize: 13, display: 'flex', gap: 16, alignItems: 'center' }}>
+          <legend style={{ fontSize: 11, color: '#aaa', padding: '0 4px' }}>Clip context</legend>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="radio" name="clipMode" value="score" checked={clipMode === 'score'} onChange={() => setClipMode('score')} />
+            Ellistown score
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="radio" name="clipMode" value="defense" checked={clipMode === 'defense'} onChange={() => setClipMode('defense')} />
+            Ellistown defense
+          </label>
+        </fieldset>
+      </div>
 
       <div className="processing-info">
         <p>
@@ -233,8 +270,14 @@ export default function ResultsViewer({
           <button onClick={() => setShowBotSortOverlay(!showBotSortOverlay)} className={`sidebar-toggle ${showBotSortOverlay ? 'active' : ''}`}>
             🎯 BotSort Overlay
           </button>
+          <button onClick={() => setShowTrails(t => !t)} className={`sidebar-toggle ${showTrails ? 'active' : ''}`}>
+            〰 Show Trails
+          </button>
           <button onClick={handleClassifyTeams} disabled={isClassifying} className="sidebar-toggle">
             {isClassifying ? '⏳ Classifying…' : '🎽 Classify Teams'}
+          </button>
+          <button onClick={handleComputeKpis} disabled={isComputingKpis} className="sidebar-toggle">
+            {isComputingKpis ? '⏳ Computing…' : '📊 Compute KPIs'}
           </button>
         </div>
       </div>
@@ -278,20 +321,193 @@ export default function ResultsViewer({
             ) : (
               <div className="video-placeholder"><p>Video not available</p></div>
             )}
+
+            {/* Mapping view — warped frame for the current position, sits below the video */}
+            <details className="debug-panel" style={{ marginTop: 8 }} onToggle={(e) => setShowMappingView((e.target as HTMLDetailsElement).open)}>
+              <summary>🗺️ Mapping View</summary>
+              {showMappingView && (
+                <div className="debug-panel-body">
+                  <p className="debug-info">
+                    Frame {currentFrame} —{' '}
+                    {homographyFrameIndices.includes(currentFrame)
+                      ? <strong style={{ color: 'green' }}>anchor frame</strong>
+                      : <span style={{ color: '#888' }}>propagated frame</span>}
+                  </p>
+                  <div style={{ overflow: 'hidden', border: '1px solid #ccc', borderRadius: 4 }}>
+                    <img
+                      key={currentFrame}
+                      src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/warped`}
+                      alt={`Warped frame ${currentFrame} with pitch lines`}
+                      style={{ width: '100%', height: 'auto', display: 'block' }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    />
+                  </div>
+                </div>
+              )}
+            </details>
           </div>
 
           <div className="pitch-view-panel">
             <h4>2D Pitch View</h4>
-            <canvas ref={canvasRef} width={PITCH_DISPLAY_WIDTH} height={PITCH_DISPLAY_HEIGHT} className="pitch-canvas" />
-            <div className="pitch-legend">
-              {Object.keys(teamClassifications).length > 0 ? (
-                <>
-                  <span style={{ color: '#FFD700' }}>● Ellistown</span>
-                  <span style={{ color: '#4488FF', marginLeft: 12 }}>● Opposition</span>
-                  <span style={{ color: '#888', marginLeft: 12 }}>● Unclassified</span>
-                </>
-              ) : (
-                <span>● Each player has a unique color based on their track ID</span>
+            <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+              <div>
+                <canvas ref={canvasRef} width={PITCH_DISPLAY_WIDTH} height={PITCH_DISPLAY_HEIGHT} className="pitch-canvas" />
+                <div className="pitch-legend">
+                  {Object.keys(teamClassifications).length > 0 ? (
+                    <>
+                      <span style={{ color: '#FFD700' }}>● Ellistown</span>
+                      <span style={{ color: '#4488FF', marginLeft: 12 }}>● Opposition</span>
+                      <span style={{ color: '#888', marginLeft: 12 }}>● Unclassified</span>
+                    </>
+                  ) : (
+                    <span>● Each player has a unique color based on their track ID</span>
+                  )}
+                </div>
+              </div>
+
+              {kpiSummary && (() => {
+                const { spatial_summary, zone_balance_timeseries } = kpiSummary
+
+                // Average zone counts across all frames
+                const totals: Record<string, Record<string, number>> = {}
+                let frameCount = 0
+                for (const frame of Object.values(zone_balance_timeseries)) {
+                  frameCount++
+                  for (const [team, zones] of Object.entries(frame)) {
+                    if (!totals[team]) totals[team] = { defensive: 0, middle: 0, attacking: 0 }
+                    totals[team].defensive += zones.defensive
+                    totals[team].middle += zones.middle
+                    totals[team].attacking += zones.attacking
+                  }
+                }
+
+                // Auto-detect active zone from ALL players (including unclassified),
+                // so zone detection works even before Classify Teams is run.
+                const zoneActivity = { defensive: 0, middle: 0, attacking: 0 }
+                for (const zones of Object.values(totals)) {
+                  zoneActivity.defensive += zones.defensive
+                  zoneActivity.middle    += zones.middle
+                  zoneActivity.attacking += zones.attacking
+                }
+                const detectedZone = (Object.entries(zoneActivity) as [string, number][])
+                  .sort(([, a], [, b]) => b - a)[0][0] as 'defensive' | 'middle' | 'attacking'
+                const ZONE_RANGES = { defensive: '0–47m', middle: '47–93m', attacking: '93–140m' } as const
+                const yRangeLabel = ZONE_RANGES[detectedZone]
+                const clipZoneLabel = clipMode === 'score' ? 'attacking' : 'defensive'
+
+                // Zone balance — one decimal, classified players only.
+                // Falls back to total (unclassified) if Classify Teams hasn't been run.
+                let zoneSentence = ''
+                if (frameCount > 0) {
+                  const ellNf = (totals['ellistown']?.[detectedZone] ?? 0) / frameCount
+                  const oppNf = (totals['opposition']?.[detectedZone] ?? 0) / frameCount
+                  const prefix = `In the ${clipZoneLabel} third (${yRangeLabel})`
+
+                  if (ellNf === 0 && oppNf === 0) {
+                    // No classified players — show total and prompt classification
+                    const totalN = (zoneActivity[detectedZone] / frameCount).toFixed(1)
+                    zoneSentence = `${prefix}: ${totalN} players avg (classify teams for breakdown)`
+                  } else {
+                    const ellN = ellNf.toFixed(1)
+                    const oppN = oppNf.toFixed(1)
+                    if (clipMode === 'score') {
+                      if (oppNf > ellNf)
+                        zoneSentence = `${prefix}: Opposition defended with a ${oppN}v${ellN} advantage`
+                      else if (ellNf > oppNf)
+                        zoneSentence = `${prefix}: Ellistown had a ${ellN}v${oppN} numerical overload`
+                      else
+                        zoneSentence = `${prefix}: Teams level at ${ellN}v${oppN}`
+                    } else {
+                      if (oppNf > ellNf)
+                        zoneSentence = `${prefix}: Opposition had a ${oppN}v${ellN} numerical advantage`
+                      else if (ellNf > oppNf)
+                        zoneSentence = `${prefix}: Ellistown defended with a ${ellN}v${oppN} advantage`
+                      else
+                        zoneSentence = `${prefix}: Teams level at ${ellN}v${oppN}`
+                    }
+                  }
+                }
+
+                // Spread sentence
+                const ellSpread = spatial_summary.per_team['ellistown']?.mean_spread_m2
+                const oppSpread = spatial_summary.per_team['opposition']?.mean_spread_m2
+                const spreadSentence = (ellSpread != null && oppSpread != null)
+                  ? `Opposition spread: ${oppSpread} m²  /  Ellistown spread: ${ellSpread} m²`
+                  : null
+
+                // Depth differential — who's further into the active zone?
+                // Uses each team's mean centroid y, not raw separation distance.
+                // "Deeper" = higher y for attacking zone (goal at y=140),
+                //             lower y for defensive zone (goal at y=0).
+                const ellCentY = spatial_summary.per_team['ellistown']?.mean_centroid_y_m
+                const oppCentY = spatial_summary.per_team['opposition']?.mean_centroid_y_m
+                let depthSentence: string | null = null
+                if (ellCentY != null && oppCentY != null) {
+                  const gap = Math.abs(ellCentY - oppCentY).toFixed(1)
+                  const ellIsDeeper =
+                    detectedZone === 'attacking' ? ellCentY > oppCentY
+                    : detectedZone === 'defensive' ? ellCentY < oppCentY
+                    : clipMode === 'score' ? ellCentY > oppCentY
+                    : ellCentY < oppCentY
+                  if (parseFloat(gap) < 1) {
+                    depthSentence = `Team centroids were level — play was concentrated in the same spot`
+                  } else if (clipMode === 'score') {
+                    depthSentence = ellIsDeeper
+                      ? `Ellistown penetrated ${gap}m deeper than Opposition's defensive centre`
+                      : `Opposition's defensive shape sat ${gap}m ahead of Ellistown's attack`
+                  } else {
+                    depthSentence = ellIsDeeper
+                      ? `Ellistown's defensive centre dropped ${gap}m deeper than Opposition's attack`
+                      : `Opposition attacked ${gap}m ahead of Ellistown's defensive centre`
+                  }
+                }
+
+                return (
+                  <div style={{
+                    background: '#1a2a1a',
+                    border: '1px solid #3a5a3a',
+                    borderRadius: 8,
+                    padding: '14px 16px',
+                    minWidth: 200,
+                    maxWidth: 260,
+                    fontSize: 13,
+                    lineHeight: 1.6,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 12,
+                  }}>
+                    <div style={{ fontSize: 11, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      Clip summary · {clipMode === 'score' ? 'Ellistown score' : 'Ellistown defense'}
+                    </div>
+
+                    {zoneSentence && <div style={{ color: '#e0e0e0' }}>{zoneSentence}</div>}
+                    {spreadSentence && <div style={{ color: '#e0e0e0' }}>{spreadSentence}</div>}
+                    {depthSentence && <div style={{ color: '#e0e0e0' }}>{depthSentence}</div>}
+
+                    {!zoneSentence && !spreadSentence && !depthSentence && (
+                      <div style={{ color: '#888' }}>Run Compute KPIs to see summary</div>
+                    )}
+                  </div>
+                )
+              })()}
+
+              {!kpiSummary && (
+                <div style={{
+                  background: '#1a2a1a',
+                  border: '1px solid #3a5a3a',
+                  borderRadius: 8,
+                  padding: '14px 16px',
+                  minWidth: 200,
+                  maxWidth: 260,
+                  fontSize: 13,
+                  color: '#666',
+                  lineHeight: 1.6,
+                }}>
+                  <div style={{ fontSize: 11, color: '#555', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+                    Clip summary
+                  </div>
+                  Press <strong style={{ color: '#888' }}>Compute KPIs</strong> to see zone balance, team spread, and centroid separation for this clip.
+                </div>
               )}
             </div>
           </div>
@@ -322,7 +538,8 @@ export default function ResultsViewer({
         <div className="player-list">
           {playerPositions.filter(p => p.frame_idx === currentFrame).map((pos, idx) => (
             <span key={idx} className="player-badge">
-              #{pos.track_id}: ({pos.x_pitch.toFixed(1)}, {pos.y_pitch.toFixed(1)})
+              #{pos.track_id}: ({(pos.x_pitch / 10).toFixed(1)}m, {(pos.y_pitch / 10).toFixed(1)}m)
+              <small style={{ color: '#888' }}> [{Math.round(pos.x_pitch)}, {Math.round(pos.y_pitch)}px]</small>
               <small>{pos.source}</small>
             </span>
           ))}
@@ -408,79 +625,227 @@ export default function ResultsViewer({
         </details>
       )}
 
-      {/* Debug coordinate table */}
-      <div className="debug-coordinates-panel">
-        <h4>🔍 Debug: Player Coordinates (Frame {currentFrame})</h4>
-        <p className="debug-info">
-          Expected ranges: x_pitch: 0-{PITCH_CANVAS_W}, y_pitch: 0-{PITCH_CANVAS_H} →
-          Display: 0-{PITCH_DISPLAY_WIDTH} × 0-{PITCH_DISPLAY_HEIGHT}
-        </p>
-        <div className="debug-table-container">
-          <table className="debug-table">
-            <thead>
-              <tr>
-                <th>Track ID</th><th>x_pitch</th><th>y_pitch</th>
-                <th>x_display</th><th>y_display</th><th>Source</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {playerPositions
-                .filter(p => p.frame_idx === currentFrame)
-                .sort((a, b) => a.track_id - b.track_id)
-                .map((pos, idx) => {
-                  const xDisplay = (pos.x_pitch / PITCH_CANVAS_W) * PITCH_DISPLAY_WIDTH
-                  const yDisplay = (pos.y_pitch / PITCH_CANVAS_H) * PITCH_DISPLAY_HEIGHT
-                  const isOutOfBounds = pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W || pos.y_pitch < 0 || pos.y_pitch > PITCH_CANVAS_H
-                  return (
-                    <tr key={idx} className={isOutOfBounds ? 'out-of-bounds' : ''}>
-                      <td><strong>#{pos.track_id}</strong></td>
-                      <td className={pos.x_pitch < 0 || pos.x_pitch > PITCH_CANVAS_W ? 'bad-value' : ''}>{pos.x_pitch.toFixed(2)}</td>
-                      <td className={pos.y_pitch < 0 || pos.y_pitch > PITCH_CANVAS_H ? 'bad-value' : ''}>{pos.y_pitch.toFixed(2)}</td>
-                      <td>{xDisplay.toFixed(1)}</td>
-                      <td>{yDisplay.toFixed(1)}</td>
-                      <td>{pos.source}</td>
-                      <td>{isOutOfBounds ? '❌ OUT' : '✅ OK'}</td>
-                    </tr>
-                  )
-                })}
-            </tbody>
-          </table>
-          {playerPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
-            <p className="no-data">No player positions for this frame</p>
-          )}
-        </div>
-        <div className="debug-summary">
-          <span>Total players: {playerPositions.filter(p => p.frame_idx === currentFrame).length}</span>
-          <span>Out of bounds: {playerPositions.filter(p =>
-            p.frame_idx === currentFrame &&
-            (p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H)
-          ).length}</span>
-        </div>
-      </div>
-
-      {/* Mapping View debug panel */}
-      <details className="debug-panel" onToggle={(e) => setShowMappingView((e.target as HTMLDetailsElement).open)}>
-        <summary>🗺️ Mapping View</summary>
-        {showMappingView && (
+      {/* KPI Panel */}
+      {(kpiSummary || kpiError) && (
+        <details className="debug-panel" open>
+          <summary>📊 Spatial KPIs</summary>
           <div className="debug-panel-body">
-            <p className="debug-info">
-              Frame {currentFrame} —{' '}
-              {homographyFrameIndices.includes(currentFrame)
-                ? <strong style={{ color: 'green' }}>anchor frame</strong>
-                : <span style={{ color: '#888' }}>propagated frame</span>}
-            </p>
-            <div style={{ width: 425, height: 300, overflow: 'hidden', border: '1px solid #ccc', borderRadius: 4 }}>
-              <img
-                key={currentFrame}
-                src={`${API_URL}/videos/${videoMetadata.video_id}/frames/${currentFrame}/warped`}
-                alt={`Warped frame ${currentFrame} with pitch lines`}
-                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-              />
-            </div>
+            {kpiError && <p style={{ color: '#f88' }}>{kpiError}</p>}
+
+            {kpiSummary && (() => {
+              const { clip_meta: meta, per_player, spatial_summary, zone_balance_timeseries } = kpiSummary
+
+              const teamColor = (team: string) => {
+                if (team === 'ellistown') return '#FFD700'
+                if (team === 'opposition') return '#4488FF'
+                return '#888'
+              }
+
+              // Zone balance: average across all frames
+              const teamZoneTotals: Record<string, Record<string, number>> = {}
+              const frameCount = Object.keys(zone_balance_timeseries).length
+              for (const frame of Object.values(zone_balance_timeseries)) {
+                for (const [team, zones] of Object.entries(frame)) {
+                  if (!teamZoneTotals[team]) teamZoneTotals[team] = { defensive: 0, middle: 0, attacking: 0 }
+                  teamZoneTotals[team].defensive += zones.defensive
+                  teamZoneTotals[team].middle += zones.middle
+                  teamZoneTotals[team].attacking += zones.attacking
+                }
+              }
+
+              // Detect active zone from all players (same logic as clip summary panel)
+              const zoneActivity = { defensive: 0, middle: 0, attacking: 0 }
+              for (const zones of Object.values(teamZoneTotals)) {
+                zoneActivity.defensive += zones.defensive
+                zoneActivity.middle    += zones.middle
+                zoneActivity.attacking += zones.attacking
+              }
+              const detectedZone = (Object.entries(zoneActivity) as [string, number][])
+                .sort(([, a], [, b]) => b - a)[0][0] as 'defensive' | 'middle' | 'attacking'
+              const clipZoneLabel = clipMode === 'score' ? 'attacking' : 'defensive'
+              // Column labels:
+              //   middle       → always "midfield"
+              //   detectedZone → clipMode label ("attacking third" / "defensive third")
+              //   opposite end → inverse label
+              const colLabel = (zone: 'defensive' | 'middle' | 'attacking') => {
+                const ranges = { defensive: '0–47m', middle: '47–93m', attacking: '93–140m' }
+                if (zone === 'middle') return `midfield (${ranges.middle})`
+                if (zone === detectedZone) return `${clipZoneLabel} third (${ranges[zone]})`
+                const oppositeLabel = clipMode === 'score' ? 'defensive third' : 'attacking third'
+                return `${oppositeLabel} (${ranges[zone]})`
+              }
+
+              // Depth differential (same calculation as clip summary panel)
+              const ellCentY = spatial_summary.per_team['ellistown']?.mean_centroid_y_m
+              const oppCentY = spatial_summary.per_team['opposition']?.mean_centroid_y_m
+              let depthSentence: string | null = null
+              if (ellCentY != null && oppCentY != null) {
+                const gap = Math.abs(ellCentY - oppCentY).toFixed(1)
+                const ellIsDeeper =
+                  detectedZone === 'attacking' ? ellCentY > oppCentY
+                  : detectedZone === 'defensive' ? ellCentY < oppCentY
+                  : clipMode === 'score' ? ellCentY > oppCentY
+                  : ellCentY < oppCentY
+                if (parseFloat(gap) < 1) {
+                  depthSentence = `Team centroids were level — play was concentrated in the same spot`
+                } else if (clipMode === 'score') {
+                  depthSentence = ellIsDeeper
+                    ? `Ellistown penetrated ${gap}m deeper than Opposition's defensive centre`
+                    : `Opposition's defensive shape sat ${gap}m ahead of Ellistown's attack`
+                } else {
+                  depthSentence = ellIsDeeper
+                    ? `Ellistown's defensive centre dropped ${gap}m deeper than Opposition's attack`
+                    : `Opposition attacked ${gap}m ahead of Ellistown's defensive centre`
+                }
+              }
+
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {/* Clip meta */}
+                  <div style={{ fontSize: 12, color: '#aaa' }}>
+                    {meta.duration_s.toFixed(1)} s &nbsp;·&nbsp; {meta.total_frames} frames &nbsp;·&nbsp; {meta.fps} fps
+                  </div>
+
+                  {/* Centroid metrics — 2D separation + y/x components */}
+                  {(spatial_summary.centroid_separation_m || (ellCentY != null && oppCentY != null)) && (
+                    <div>
+                      <strong style={{ fontSize: 13 }}>Team centroids</strong>
+                      <table className="debug-table" style={{ fontSize: 12, marginTop: 6 }}>
+                        <thead>
+                          <tr><th>Metric</th><th>Value</th><th>Note</th></tr>
+                        </thead>
+                        <tbody>
+                          {spatial_summary.centroid_separation_m && <>
+                            <tr>
+                              <td>2D separation (mean)</td>
+                              <td><strong>{spatial_summary.centroid_separation_m.mean} m</strong></td>
+                              <td style={{ color: '#888' }}>overall compactness</td>
+                            </tr>
+                            <tr>
+                              <td>2D separation (min / max)</td>
+                              <td>{spatial_summary.centroid_separation_m.min} – {spatial_summary.centroid_separation_m.max} m</td>
+                              <td style={{ color: '#888' }}>range across clip</td>
+                            </tr>
+                          </>}
+                          {ellCentY != null && oppCentY != null && (() => {
+                            const ellCentX = spatial_summary.per_team['ellistown']?.mean_centroid_x_m
+                            const oppCentX = spatial_summary.per_team['opposition']?.mean_centroid_x_m
+                            const yGap = Math.abs(ellCentY - oppCentY).toFixed(1)
+                            const xGap = (ellCentX != null && oppCentX != null)
+                              ? Math.abs(ellCentX - oppCentX).toFixed(1)
+                              : null
+                            const deeper = detectedZone === 'attacking'
+                              ? (ellCentY > oppCentY ? 'Ellistown' : 'Opposition')
+                              : detectedZone === 'defensive'
+                              ? (ellCentY < oppCentY ? 'Ellistown' : 'Opposition')
+                              : clipMode === 'score'
+                              ? (ellCentY > oppCentY ? 'Ellistown' : 'Opposition')
+                              : (ellCentY < oppCentY ? 'Ellistown' : 'Opposition')
+                            return <>
+                              <tr>
+                                <td>Depth gap (y-axis)</td>
+                                <td><strong>{yGap} m</strong></td>
+                                <td style={{ color: '#888' }}>{deeper} further forward</td>
+                              </tr>
+                              {xGap != null && (
+                                <tr>
+                                  <td>Lateral gap (x-axis)</td>
+                                  <td>{xGap} m</td>
+                                  <td style={{ color: '#888' }}>horizontal offset</td>
+                                </tr>
+                              )}
+                              <tr>
+                                <td>Ellistown centroid</td>
+                                <td>({ellCentX?.toFixed(1)}, {ellCentY.toFixed(1)}) m</td>
+                                <td style={{ color: '#888' }}>x, y</td>
+                              </tr>
+                              <tr>
+                                <td>Opposition centroid</td>
+                                <td>({oppCentX?.toFixed(1)}, {oppCentY.toFixed(1)}) m</td>
+                                <td style={{ color: '#888' }}>x, y</td>
+                              </tr>
+                            </>
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Team spread */}
+                  {Object.keys(spatial_summary.per_team).length > 0 && (
+                    <div>
+                      <strong style={{ fontSize: 13 }}>Team spread (mean convex hull)</strong>
+                      <div style={{ display: 'flex', gap: 24, marginTop: 6, flexWrap: 'wrap' }}>
+                        {Object.entries(spatial_summary.per_team)
+                          .filter(([t]) => t !== 'unclassified')
+                          .map(([team, s]) => (
+                            <div key={team}>
+                              <span style={{ color: teamColor(team), fontWeight: 600, textTransform: 'capitalize', fontSize: 12 }}>
+                                {team}
+                              </span>
+                              <div style={{ fontSize: 13 }}>{s.mean_spread_m2} m²</div>
+                              <div style={{ fontSize: 11, color: '#888' }}>
+                                centroid ({s.mean_centroid_x_m}, {s.mean_centroid_y_m}) m
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Zone balance — all three zones; active zone column highlighted */}
+                  {Object.keys(teamZoneTotals).length > 0 && (
+                    <div>
+                      <strong style={{ fontSize: 13 }}>Zone balance (avg players per frame)</strong>
+                      <table className="debug-table" style={{ fontSize: 12, marginTop: 6 }}>
+                        <thead>
+                          <tr>
+                            <th>Team</th>
+                            <th style={detectedZone === 'defensive' ? { color: '#FFD700' } : {}}>{colLabel('defensive')}</th>
+                            <th style={detectedZone === 'middle'    ? { color: '#FFD700' } : {}}>{colLabel('middle')}</th>
+                            <th style={detectedZone === 'attacking' ? { color: '#FFD700' } : {}}>{colLabel('attacking')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(teamZoneTotals)
+                            .filter(([t]) => t !== 'unclassified')
+                            .map(([team, zones]) => (
+                              <tr key={team}>
+                                <td style={{ color: teamColor(team), fontWeight: 600, textTransform: 'capitalize' }}>{team}</td>
+                                <td style={detectedZone === 'defensive' ? { fontWeight: 600 } : { color: '#888' }}>{frameCount > 0 ? (zones.defensive / frameCount).toFixed(1) : 0}</td>
+                                <td style={detectedZone === 'middle'    ? { fontWeight: 600 } : { color: '#888' }}>{frameCount > 0 ? (zones.middle    / frameCount).toFixed(1) : 0}</td>
+                                <td style={detectedZone === 'attacking' ? { fontWeight: 600 } : { color: '#888' }}>{frameCount > 0 ? (zones.attacking / frameCount).toFixed(1) : 0}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Per-player distance */}
+                  <div>
+                    <strong style={{ fontSize: 13 }}>Distance covered</strong>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                      {Object.entries(per_player)
+                        .filter(([, m]) => m.team !== 'referee' && m.team !== 'ignore')
+                        .sort(([, a], [, b]) => b.total_distance_m - a.total_distance_m)
+                        .map(([tid, m]) => (
+                          <span key={tid} style={{
+                            background: '#1a1a2e', borderRadius: 6, padding: '3px 8px',
+                            fontSize: 12, border: '1px solid #333',
+                          }}>
+                            <span style={{ color: teamColor(m.team) }}>#{tid}</span>
+                            {' '}{m.total_distance_m} m
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
           </div>
-        )}
-      </details>
+        </details>
+      )}
 
     </div>
   )

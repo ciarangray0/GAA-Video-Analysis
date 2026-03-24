@@ -677,6 +677,8 @@ button.warning:hover {
 .results-content {
   display: flex;
   gap: 20px;
+  overflow-x: auto;
+  min-width: 0;
 }
 
 /* Homography Sidebar */
@@ -800,8 +802,10 @@ button.warning:hover {
   flex: 1;
   display: flex;
   gap: 20px;
-  justify-content: center;
-  flex-wrap: wrap;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  min-width: 0;
 }
 
 .results-main.with-sidebar {
@@ -822,9 +826,10 @@ button.warning:hover {
 }
 
 .pitch-view-panel {
-  /* Fixed width to prevent layout shifts during playback */
-  width: 360px;
+  /* Let the panel grow to fit canvas + KPI summary panel side by side */
+  flex-shrink: 0;
   min-width: 360px;
+  width: auto;
 }
 
 .video-frame-panel h4, .pitch-view-panel h4 {

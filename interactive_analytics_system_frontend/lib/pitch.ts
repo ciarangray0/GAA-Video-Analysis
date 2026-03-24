@@ -183,6 +183,7 @@ export function drawPitch(
   positions: PlayerPosition[],
   frame: number,
   teamClassifications?: TeamClassifications,
+  showTrails = false,
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -259,13 +260,6 @@ export function drawPitch(
   const framePositions = positions.filter(p => p.frame_idx === frame && validTrackIds.has(p.track_id))
   const activeTrackIds = new Set(framePositions.map(p => p.track_id))
 
-  const outOfBounds = framePositions.filter(
-    p => p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H,
-  )
-  if (outOfBounds.length > 0) {
-    console.warn(`Frame ${frame}: ${outOfBounds.length} out-of-bounds positions:`, outOfBounds)
-  }
-
   // Returns the dot colour for a track, or null if the track should be hidden.
   const getPlayerColor = (trackId: number): string | null => {
     if (teamClassifications) {
@@ -275,6 +269,50 @@ export function drawPitch(
       if (cls?.team === 'opposition') return '#4488FF'
     }
     return `hsl(${(trackId * 137.508) % 360}, 70%, 50%)`
+  }
+
+  // Draw trails — full trajectories as faded lines, coloured by team
+  if (showTrails) {
+    // Group all positions by track
+    const byTrack = new Map<number, PlayerPosition[]>()
+    for (const p of positions) {
+      if (!byTrack.has(p.track_id)) byTrack.set(p.track_id, [])
+      byTrack.get(p.track_id)!.push(p)
+    }
+
+    byTrack.forEach((pts, trackId) => {
+      const color = getPlayerColor(trackId)
+      if (color === null) return  // referee/ignore
+
+      // Sort by frame so the line goes in temporal order
+      pts.sort((a, b) => a.frame_idx - b.frame_idx)
+
+      // Parse team colour to draw the trail in a matching shade
+      // Use the same colour string at low alpha for the trail
+      ctx.save()
+      ctx.globalAlpha = 0.35
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([3, 3])
+      ctx.beginPath()
+      let started = false
+      for (const p of pts) {
+        const x = Math.max(0, Math.min(W, (p.x_pitch / PITCH_CANVAS_W) * W))
+        const y = Math.max(0, Math.min(H, (p.y_pitch / PITCH_CANVAS_H) * H))
+        if (!started) { ctx.moveTo(x, y); started = true }
+        else ctx.lineTo(x, y)
+      }
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.restore()
+    })
+  }
+
+  const outOfBounds = framePositions.filter(
+    p => p.x_pitch < 0 || p.x_pitch > PITCH_CANVAS_W || p.y_pitch < 0 || p.y_pitch > PITCH_CANVAS_H,
+  )
+  if (outOfBounds.length > 0) {
+    console.warn(`Frame ${frame}: ${outOfBounds.length} out-of-bounds positions:`, outOfBounds)
   }
 
   // For each track that has been seen at some point up to this frame but is

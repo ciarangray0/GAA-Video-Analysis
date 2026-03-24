@@ -1,4 +1,4 @@
-import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications } from '../types'
+import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications, KpiSummary } from '../types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -122,6 +122,15 @@ export async function overrideTeamClassification(
   }
   const data = await res.json()
   return data.classifications ?? {}
+}
+
+export async function computeKpis(videoId: string): Promise<KpiSummary> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/compute-kpis`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'KPI computation failed')
+  }
+  return res.json()
 }
 
 export { API_URL }
