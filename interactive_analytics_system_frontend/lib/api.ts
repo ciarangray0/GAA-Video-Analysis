@@ -124,8 +124,9 @@ export async function overrideTeamClassification(
   return data.classifications ?? {}
 }
 
-export async function computeKpis(videoId: string): Promise<KpiSummary> {
-  const res = await fetch(`${API_URL}/videos/${videoId}/compute-kpis`, { method: 'POST' })
+export async function computeKpis(videoId: string, endFrame?: number): Promise<KpiSummary> {
+  const qs = endFrame !== undefined ? `?end_frame=${endFrame}` : ''
+  const res = await fetch(`${API_URL}/videos/${videoId}/compute-kpis${qs}`, { method: 'POST' })
   if (!res.ok) {
     const err = await res.json()
     throw new Error(err.detail || 'KPI computation failed')

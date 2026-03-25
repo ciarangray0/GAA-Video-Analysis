@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import type { VideoMetadata, PlayerPosition, TeamClassifications, TeamName, ClassifyTeamsSummary, KpiSummary } from '../types'
 import { drawPitch, hsvToCss } from '../lib/pitch'
 import { PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT, PITCH_CANVAS_W, PITCH_CANVAS_H } from '../lib/constants'
@@ -53,6 +53,19 @@ export default function ResultsViewer({
   // Debug panel state
   const [showMappingView, setShowMappingView] = useState(false)
 
+  // Analysis trim — limits which positions are used for pitch display and KPI computation.
+  // Video playback and annotations are unaffected.
+  // trimEndFrame is the committed value (drives canvas redraws / KPI).
+  // trimDragFrame is the live slider position — only updates the label while dragging.
+  const [trimEndFrame, setTrimEndFrame] = useState(processedEndFrame)
+  const [trimDragFrame, setTrimDragFrame] = useState(processedEndFrame)
+  useEffect(() => { setTrimEndFrame(processedEndFrame); setTrimDragFrame(processedEndFrame) }, [processedEndFrame])
+
+  const analysisPositions = useMemo(
+    () => playerPositions.filter(p => p.frame_idx <= trimEndFrame),
+    [playerPositions, trimEndFrame]
+  )
+
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoPlayerRef = useRef<HTMLVideoElement>(null)
   const animFrameRef = useRef<number>(0)
@@ -89,14 +102,14 @@ export default function ResultsViewer({
     setIsComputingKpis(true)
     setKpiError(null)
     try {
-      const result = await computeKpis(videoMetadata.video_id)
+      const result = await computeKpis(videoMetadata.video_id, trimEndFrame)
       setKpiSummary(result)
     } catch (e: any) {
       setKpiError(e.message || 'KPI computation failed')
     } finally {
       setIsComputingKpis(false)
     }
-  }, [videoMetadata.video_id])
+  }, [videoMetadata.video_id, trimEndFrame])
 
   const handleOverrideTeam = useCallback(async (trackId: number, team: string) => {
     try {
@@ -109,15 +122,15 @@ export default function ResultsViewer({
 
   // Redraw pitch when frame, classifications, or trails toggle changes
   useEffect(() => {
-    if (canvasRef.current && playerPositions.length > 0) {
-      drawPitch(canvasRef.current, playerPositions, currentFrame, teamClassifications, showTrails)
+    if (canvasRef.current && analysisPositions.length > 0) {
+      drawPitch(canvasRef.current, analysisPositions, currentFrame, teamClassifications, showTrails)
     }
-  }, [currentFrame, playerPositions, teamClassifications, showTrails])
+  }, [currentFrame, analysisPositions, teamClassifications, showTrails])
 
   const getFramesWithPositions = useCallback(() => {
-    const frames = new Set(playerPositions.map(p => p.frame_idx))
+    const frames = new Set(analysisPositions.map(p => p.frame_idx))
     return Array.from(frames).sort((a, b) => a - b)
-  }, [playerPositions])
+  }, [analysisPositions])
 
   const goToFrame = useCallback((frameIdx: number) => {
     const frames = getFramesWithPositions()
@@ -156,14 +169,14 @@ export default function ResultsViewer({
     if (!video || video.paused) { setIsPlaying(false); return }
     const fps = processedFps || videoMetadata.fps || 25
     const frameIdx = Math.round(video.currentTime * fps)
-    if (frameIdx > processedEndFrame) {
+    if (frameIdx > trimEndFrame) {
       video.pause()
       setIsPlaying(false)
       return
     }
     onFrameChange(frameIdx)
     animFrameRef.current = requestAnimationFrame(onPlaybackFrame)
-  }, [processedFps, processedEndFrame, videoMetadata.fps, onFrameChange])
+  }, [processedFps, trimEndFrame, videoMetadata.fps, onFrameChange])
 
   const startPlayback = useCallback(() => {
     const video = videoPlayerRef.current
@@ -172,7 +185,7 @@ export default function ResultsViewer({
     const fps = processedFps || videoMetadata.fps || 25
     const startTime = processedStartFrame / fps
     // Reset to start if video has ended or is past the end; also honour startTime
-    if (video.ended || video.currentTime >= processedEndFrame / fps) {
+    if (video.ended || video.currentTime >= trimEndFrame / fps) {
       video.currentTime = startTime
     } else if (video.currentTime < startTime) {
       video.currentTime = startTime
@@ -186,7 +199,7 @@ export default function ResultsViewer({
         console.warn('Playback blocked:', err)
         setIsPlaying(false)
       })
-  }, [playbackSpeed, playerPositions.length, processedFps, processedStartFrame, processedEndFrame, videoMetadata.fps, onPlaybackFrame])
+  }, [playbackSpeed, playerPositions.length, processedFps, processedStartFrame, trimEndFrame, videoMetadata.fps, onPlaybackFrame])
 
   const togglePlayback = useCallback(() => {
     isPlaying ? stopPlayback() : startPlayback()
@@ -298,6 +311,39 @@ export default function ResultsViewer({
         </span>
       </div>
 
+      {/* Analysis trim slider */}
+      <div className="frame-slider" style={{ gap: 10 }}>
+        <span style={{ fontSize: 12, color: '#aaa', whiteSpace: 'nowrap' }}>Analysis trim end:</span>
+        <input
+          type="range"
+          min={processedStartFrame}
+          max={processedEndFrame}
+          value={trimDragFrame}
+          onChange={(e) => setTrimDragFrame(parseInt(e.target.value))}
+          className="slider"
+          style={{ accentColor: '#ff9900' }}
+        />
+        <span className="frame-info" style={{ color: '#8b949e', whiteSpace: 'nowrap', minWidth: 120 }}>
+          {`frame ${trimDragFrame} / ${processedEndFrame} (${(trimDragFrame / videoMetadata.fps).toFixed(1)}s)`}
+        </span>
+        <button
+          onClick={() => setTrimEndFrame(trimDragFrame)}
+          style={{
+            padding: '2px 8px', fontSize: 11, margin: 0,
+            background: trimDragFrame === trimEndFrame ? '#1a7a3a' : '#b45a00',
+            color: '#fff',
+          }}
+        >
+          {trimDragFrame === trimEndFrame ? '✓ Trim applied' : 'Apply trim'}
+        </button>
+        <button
+          onClick={() => { setTrimDragFrame(processedEndFrame); setTrimEndFrame(processedEndFrame) }}
+          style={{ padding: '2px 8px', fontSize: 11, margin: 0, background: '#555', color: '#ccc' }}
+        >
+          Reset
+        </button>
+      </div>
+
       {/* Main content area */}
       <div className="results-content">
           {/* Side-by-side view */}
@@ -366,7 +412,7 @@ export default function ResultsViewer({
               </div>
 
               {kpiSummary && (() => {
-                const { spatial_summary, zone_balance_timeseries } = kpiSummary
+                const { spatial_summary, spatial_timeseries, zone_balance_timeseries } = kpiSummary
 
                 // Average zone counts across all frames
                 const totals: Record<string, Record<string, number>> = {}
@@ -435,31 +481,41 @@ export default function ResultsViewer({
                   ? `Opposition spread: ${oppSpread} m²  /  Ellistown spread: ${ellSpread} m²`
                   : null
 
-                // Depth differential — who's further into the active zone?
-                // Uses each team's mean centroid y, not raw separation distance.
-                // "Deeper" = higher y for attacking zone (goal at y=140),
-                //             lower y for defensive zone (goal at y=0).
-                const ellCentY = spatial_summary.per_team['ellistown']?.mean_centroid_y_m
-                const oppCentY = spatial_summary.per_team['opposition']?.mean_centroid_y_m
+                // Depth: compare centroid y at the start and end of the clip rather than
+                // the average — averages hide the movement that actually matters.
+                // "goal-side" = closer to the contested goal:
+                //   detectedZone='defensive' → goal at y=0, lower y = goal-side
+                //   detectedZone='attacking' → goal at y=140, higher y = goal-side
+                const tsKeys = Object.keys(spatial_timeseries).map(Number).sort((a, b) => a - b)
+                const bothPresent = tsKeys.filter(k => {
+                  const f = spatial_timeseries[k.toString()]
+                  return f?.teams?.['ellistown']?.centroid_y_m != null
+                    && f?.teams?.['opposition']?.centroid_y_m != null
+                })
                 let depthSentence: string | null = null
-                if (ellCentY != null && oppCentY != null) {
-                  const gap = Math.abs(ellCentY - oppCentY).toFixed(1)
-                  const ellIsDeeper =
-                    detectedZone === 'attacking' ? ellCentY > oppCentY
-                    : detectedZone === 'defensive' ? ellCentY < oppCentY
-                    : clipMode === 'score' ? ellCentY > oppCentY
-                    : ellCentY < oppCentY
-                  if (parseFloat(gap) < 1) {
-                    depthSentence = `Team centroids were level — play was concentrated in the same spot`
-                  } else if (clipMode === 'score') {
-                    depthSentence = ellIsDeeper
-                      ? `Ellistown penetrated ${gap}m deeper than Opposition's defensive centre`
-                      : `Opposition's defensive shape sat ${gap}m ahead of Ellistown's attack`
-                  } else {
-                    depthSentence = ellIsDeeper
-                      ? `Ellistown's defensive centre dropped ${gap}m deeper than Opposition's attack`
-                      : `Opposition attacked ${gap}m ahead of Ellistown's defensive centre`
+                if (bothPresent.length >= 2) {
+                  const f0 = spatial_timeseries[bothPresent[0].toString()]
+                  const f1 = spatial_timeseries[bothPresent[bothPresent.length - 1].toString()]
+                  const eY0 = f0.teams['ellistown'].centroid_y_m
+                  const oY0 = f0.teams['opposition'].centroid_y_m
+                  const eY1 = f1.teams['ellistown'].centroid_y_m
+                  const oY1 = f1.teams['opposition'].centroid_y_m
+                  const oppGoalSide = (eY: number, oY: number) =>
+                    detectedZone === 'attacking' ? oY > eY : oY < eY
+                  const desc = (eY: number, oY: number): string => {
+                    const gs = oppGoalSide(eY, oY)
+                    const gap = Math.abs(eY - oY).toFixed(1)
+                    if (clipMode === 'score') {
+                      return gs
+                        ? `Opposition ${gap}m goal-side`
+                        : `Ellistown ${gap}m goal-side`
+                    } else {
+                      return gs
+                        ? `Opposition ${gap}m goal-side`
+                        : `Ellistown ${gap}m goal-side`
+                    }
                   }
+                  depthSentence = `Clip start: ${desc(eY0, oY0)} · Clip end: ${desc(eY1, oY1)}`
                 }
 
                 return (
@@ -536,14 +592,14 @@ export default function ResultsViewer({
       <div className="current-frame-players">
         <h4>Players in Frame {currentFrame}</h4>
         <div className="player-list">
-          {playerPositions.filter(p => p.frame_idx === currentFrame).map((pos, idx) => (
+          {analysisPositions.filter(p => p.frame_idx === currentFrame).map((pos, idx) => (
             <span key={idx} className="player-badge">
               #{pos.track_id}: ({(pos.x_pitch / 10).toFixed(1)}m, {(pos.y_pitch / 10).toFixed(1)}m)
               <small style={{ color: '#888' }}> [{Math.round(pos.x_pitch)}, {Math.round(pos.y_pitch)}px]</small>
               <small>{pos.source}</small>
             </span>
           ))}
-          {playerPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
+          {analysisPositions.filter(p => p.frame_idx === currentFrame).length === 0 && (
             <span className="no-players">No players detected in this frame</span>
           )}
         </div>
@@ -633,7 +689,7 @@ export default function ResultsViewer({
             {kpiError && <p style={{ color: '#f88' }}>{kpiError}</p>}
 
             {kpiSummary && (() => {
-              const { clip_meta: meta, per_player, spatial_summary, zone_balance_timeseries } = kpiSummary
+              const { clip_meta: meta, per_player, spatial_summary, spatial_timeseries, zone_balance_timeseries } = kpiSummary
 
               const teamColor = (team: string) => {
                 if (team === 'ellistown') return '#FFD700'
@@ -679,23 +735,29 @@ export default function ResultsViewer({
               const ellCentY = spatial_summary.per_team['ellistown']?.mean_centroid_y_m
               const oppCentY = spatial_summary.per_team['opposition']?.mean_centroid_y_m
               let depthSentence: string | null = null
-              if (ellCentY != null && oppCentY != null) {
-                const gap = Math.abs(ellCentY - oppCentY).toFixed(1)
-                const ellIsDeeper =
-                  detectedZone === 'attacking' ? ellCentY > oppCentY
-                  : detectedZone === 'defensive' ? ellCentY < oppCentY
-                  : clipMode === 'score' ? ellCentY > oppCentY
-                  : ellCentY < oppCentY
-                if (parseFloat(gap) < 1) {
-                  depthSentence = `Team centroids were level — play was concentrated in the same spot`
-                } else if (clipMode === 'score') {
-                  depthSentence = ellIsDeeper
-                    ? `Ellistown penetrated ${gap}m deeper than Opposition's defensive centre`
-                    : `Opposition's defensive shape sat ${gap}m ahead of Ellistown's attack`
-                } else {
-                  depthSentence = ellIsDeeper
-                    ? `Ellistown's defensive centre dropped ${gap}m deeper than Opposition's attack`
-                    : `Opposition attacked ${gap}m ahead of Ellistown's defensive centre`
+              // Start→end centroid depth comparison (same logic as clip summary)
+              {
+                const tsKeys2 = Object.keys(spatial_timeseries).map(Number).sort((a, b) => a - b)
+                const bp2 = tsKeys2.filter(k => {
+                  const f = spatial_timeseries[k.toString()]
+                  return f?.teams?.['ellistown']?.centroid_y_m != null
+                    && f?.teams?.['opposition']?.centroid_y_m != null
+                })
+                if (bp2.length >= 2) {
+                  const f0 = spatial_timeseries[bp2[0].toString()]
+                  const f1 = spatial_timeseries[bp2[bp2.length - 1].toString()]
+                  const eY0 = f0.teams['ellistown'].centroid_y_m
+                  const oY0 = f0.teams['opposition'].centroid_y_m
+                  const eY1 = f1.teams['ellistown'].centroid_y_m
+                  const oY1 = f1.teams['opposition'].centroid_y_m
+                  const oppGs = (eY: number, oY: number) =>
+                    detectedZone === 'attacking' ? oY > eY : oY < eY
+                  const desc2 = (eY: number, oY: number): string => {
+                    const gs = oppGs(eY, oY)
+                    const gap = Math.abs(eY - oY).toFixed(1)
+                    return gs ? `Opposition ${gap}m goal-side` : `Ellistown ${gap}m goal-side`
+                  }
+                  depthSentence = `Clip start: ${desc2(eY0, oY0)} · Clip end: ${desc2(eY1, oY1)}`
                 }
               }
 
@@ -745,7 +807,7 @@ export default function ResultsViewer({
                               <tr>
                                 <td>Depth gap (y-axis)</td>
                                 <td><strong>{yGap} m</strong></td>
-                                <td style={{ color: '#888' }}>{deeper} further forward</td>
+                                <td style={{ color: '#888' }}>{deeper} closer to goal</td>
                               </tr>
                               {xGap != null && (
                                 <tr>
@@ -768,6 +830,11 @@ export default function ResultsViewer({
                           })()}
                         </tbody>
                       </table>
+                      {depthSentence && (
+                        <div style={{ marginTop: 8, fontSize: 12, color: '#ccc', lineHeight: 1.5 }}>
+                          {depthSentence}
+                        </div>
+                      )}
                     </div>
                   )}
 

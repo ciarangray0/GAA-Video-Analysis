@@ -20,6 +20,7 @@ All backend API calls. Every function throws a typed `Error` on HTTP failure (pa
 | `classifyTeams(videoId)` | `POST /videos/{id}/classify-teams` | Runs jersey-colour classification; returns `ClassifyTeamsResponse` (`{classifications, summary}`) |
 | `getTeamClassifications(videoId)` | `GET /videos/{id}/classify-teams` | Returns stored `TeamClassifications` dict; returns `{}` on 404 (non-throwing) |
 | `overrideTeamClassification(videoId, trackId, team)` | `PATCH /videos/{id}/classify-teams` | Overrides one track's team assignment; returns updated `TeamClassifications` |
+| `computeKpis(videoId, endFrame?)` | `POST /videos/{id}/compute-kpis` | Computes spatial + locomotor KPIs; optional `endFrame` appended as `?end_frame=N` to trim trailing frames from computation. Returns `KpiSummary`. |
 
 **`API_URL`** is read from `process.env.NEXT_PUBLIC_API_URL` at build time, defaulting to `http://localhost:8000`.
 

@@ -1504,6 +1504,51 @@ details[open].debug-panel > summary::before {
   color: var(--text-muted);
 }
 
+/* ===== FULL-BLEED RESULTS LAYOUT ===== */
+/* Activated once step 5 results are ready. Takes over the full viewport so
+   the results panel gets maximum horizontal space. */
+.results-full-layout {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  background: var(--bg);
+  z-index: 50;
+}
+
+/* Narrow left column: pipeline steps + debug log */
+.pipeline-panel {
+  width: 380px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 20px;
+  border-right: 1px solid var(--border);
+  background: var(--surface2);
+  display: flex;
+  flex-direction: column;
+}
+
+.pipeline-panel__title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 16px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Right column: ResultsViewer fills remaining width */
+.results-panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px;
+  background: var(--bg);
+}
+
 /* ===== TWO-COLUMN APP LAYOUT ===== */
 .app-layout {
   display: flex;

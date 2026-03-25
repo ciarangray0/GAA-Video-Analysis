@@ -838,7 +838,7 @@ async def get_team_classifications(video_id: str):
 
 
 @app.post("/videos/{video_id}/compute-kpis")
-async def compute_kpis(video_id: str):
+async def compute_kpis(video_id: str, end_frame: Optional[int] = Query(None)):
     """Compute locomotor and spatial KPIs for all players in the clip."""
     from pipeline.kpi import compute_clip_summary
 
@@ -858,6 +858,9 @@ async def compute_kpis(video_id: str):
     )
 
     fps = store.videos[video_id].get("fps") or 25.0
+
+    if end_frame is not None:
+        positions = [p for p in positions if p.frame_idx <= end_frame]
 
     pos_dicts = [
         {

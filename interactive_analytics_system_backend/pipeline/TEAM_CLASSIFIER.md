@@ -42,23 +42,27 @@ Extracts the yellow pixel fraction from a single detection's jersey region.
 
 Classifies every player track in the detection list.
 
-**Algorithm:**
+**Algorithm — single sequential video pass:**
+
+The function avoids the naive approach of seeking to each sampled frame individually per track (which would decode the same frame once per track that samples it, and cause expensive backward seeks). Instead:
 
 1. Group `detections` by `track_id`.
-2. Open the video file once (`cv2.VideoCapture`), shared across all tracks.
-3. For each track:
-   a. Sort detections by `frame_idx`.
-   b. **Down-sample:** step through every `max(1, len(dets) // sample_frames)` detection, keeping at most `sample_frames` samples. This makes classification approximately O(1) per track regardless of track length.
-   c. For each sampled detection: seek to `frame_idx`, read the frame, call `extract_jersey_yellow`.
-   d. Collect `mean_hsv` and `yellow_fraction` arrays across all sampled frames.
-   e. Compute `mean_yellow = mean(yellow_fractions)`.
-   f. **Classify:**
-      - If `mean_yellow >= MIN_YELLOW_FRACTION` → `team = 'ellistown'`, `confidence = min(1.0, mean_yellow / (MIN_YELLOW_FRACTION * 2))`.
-      - Otherwise → `team = 'opposition'`, `confidence = 1.0 - min(1.0, mean_yellow / MIN_YELLOW_FRACTION)`.
-   g. Store `{team, confidence: float (3 dp), mean_hsv: [H, S, V] (1 dp)}`.
+2. **Build a frame→samples map:** For each track, sort its detections by `frame_idx`, down-sample evenly (`step = max(1, len(dets) // sample_frames)`), then add each sampled detection to a dict keyed by `frame_idx`:
+   ```
+   frame_to_samples: Dict[int, List[(track_id, bbox)]]
+   ```
+   Multiple tracks that sample the same frame all appear in the same list entry — that frame is only decoded once regardless of how many tracks need it.
+3. **Single forward pass:** Open the video with `cv2.VideoCapture`. Iterate `sorted(frame_to_samples)` — frame indices in ascending order so seeks are strictly non-decreasing. For each unique frame index: `cap.set(CAP_PROP_POS_FRAMES, frame_idx)`, read the frame once, then call `extract_jersey_yellow` for every `(track_id, bbox)` pair in that frame's entry.
+4. Accumulate `mean_hsv` and `yellow_fraction` values per track in `track_hsv` / `track_yellow` dicts.
+5. After the pass, classify each track:
+   - Compute `mean_yellow = mean(yellow_fractions)`.
+   - If `mean_yellow >= MIN_YELLOW_FRACTION` → `team = 'ellistown'`, `confidence = min(1.0, mean_yellow / (MIN_YELLOW_FRACTION * 2))`.
+   - Otherwise → `team = 'opposition'`, `confidence = 1.0 - min(1.0, mean_yellow / MIN_YELLOW_FRACTION)`.
+   - Store `{team, confidence: float (3 dp), mean_hsv: [H, S, V] (1 dp)}`.
+6. Tracks with no usable samples (all frames unreadable) default to `'opposition'` with `confidence=0.0`.
+7. Logs a summary: `"{N} ellistown, {M} opposition from {T} tracks"` at INFO level.
 
-4. Tracks with no usable samples (e.g. all frames unreadable) default to `'opposition'` with `confidence=0.0`.
-5. Logs a summary: `"{N} ellistown, {M} opposition from {T} tracks"` at INFO level.
+**Performance:** With N tracks all spanning the same clip, the naive approach performs up to `N × sample_frames` video decodes. The single-pass approach reduces this to the number of *unique* sampled frame indices. Since all tracks are present across the same clip, sampled frames overlap heavily across tracks, and the actual number of unique frames decoded is typically close to `sample_frames` regardless of track count.
 
 **Returns:** `Dict[int, dict]` mapping `track_id → {team, confidence, mean_hsv}`.
 

@@ -97,8 +97,9 @@ def classify_tracks(
 ) -> Dict[int, dict]:
     """Classify each player track as 'ellistown' or 'opposition'.
 
-    Samples frames for each track, inspects the jersey region (top half of
-    bbox) for Ellistown yellow pixels, and classifies based on the fraction.
+    Samples frames for each track (evenly spaced across the track's duration),
+    then does a single sequential forward pass through the video — each unique
+    frame is decoded exactly once regardless of how many tracks appear in it.
 
     Referees should be filtered out before calling this function.
 
@@ -114,27 +115,39 @@ def classify_tracks(
     for det in detections:
         by_track.setdefault(det.track_id, []).append(det)
 
-    cap = cv2.VideoCapture(video_path)
-    classifications: Dict[int, dict] = {}
-
+    # Build frame_idx -> [(track_id, bbox), ...] so each frame is read once.
+    frame_to_samples: Dict[int, List[tuple]] = {}
     for track_id, dets in by_track.items():
         dets_sorted = sorted(dets, key=lambda d: d.frame_idx)
-
         step = max(1, len(dets_sorted) // sample_frames)
         sampled = dets_sorted[::step][:sample_frames]
-
-        hsv_samples      = []
-        yellow_fractions = []
-
         for det in sampled:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, det.frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            hsv, yf = extract_jersey_yellow(frame, (det.x1, det.y1, det.x2, det.y2))
+            frame_to_samples.setdefault(det.frame_idx, []).append(
+                (track_id, (det.x1, det.y1, det.x2, det.y2))
+            )
+
+    # Accumulators keyed by track_id.
+    track_hsv: Dict[int, list] = {tid: [] for tid in by_track}
+    track_yellow: Dict[int, list] = {tid: [] for tid in by_track}
+
+    # Single forward pass — seeks are strictly non-decreasing.
+    cap = cv2.VideoCapture(video_path)
+    for frame_idx in sorted(frame_to_samples):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        for track_id, bbox in frame_to_samples[frame_idx]:
+            hsv, yf = extract_jersey_yellow(frame, bbox)
             if np.any(hsv):
-                hsv_samples.append(hsv)
-                yellow_fractions.append(yf)
+                track_hsv[track_id].append(hsv)
+                track_yellow[track_id].append(yf)
+    cap.release()
+
+    classifications: Dict[int, dict] = {}
+    for track_id in by_track:
+        hsv_samples      = track_hsv[track_id]
+        yellow_fractions = track_yellow[track_id]
 
         if not hsv_samples:
             classifications[track_id] = {
@@ -164,7 +177,6 @@ def classify_tracks(
             f"Track {track_id}: {team}  conf={confidence:.2f}  yellow={mean_yellow:.2f}"
         )
 
-    cap.release()
 
     n_ell = sum(1 for v in classifications.values() if v["team"] == "ellistown")
     n_opp = sum(1 for v in classifications.values() if v["team"] == "opposition")
