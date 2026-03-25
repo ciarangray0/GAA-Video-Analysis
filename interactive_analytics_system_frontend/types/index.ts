@@ -65,3 +65,45 @@ export interface ClassifyTeamsResponse {
   classifications: TeamClassifications
   summary: ClassifyTeamsSummary
 }
+
+export interface PlayerDistanceMetrics {
+  team: string
+  total_distance_m: number
+}
+
+export interface TeamSpatialMetrics {
+  centroid_x_m: number
+  centroid_y_m: number
+  spread_m2: number
+  num_players_visible: number
+}
+
+export interface SpatialFrame {
+  teams: Record<string, TeamSpatialMetrics>
+  centroid_separation_m: number | null
+}
+
+export interface ZoneCounts {
+  defensive: number
+  middle: number
+  attacking: number
+}
+
+export interface SpatialSummary {
+  centroid_separation_m: { mean: number; min: number; max: number }
+  per_team: Record<string, { mean_spread_m2: number; mean_centroid_x_m: number; mean_centroid_y_m: number }>
+}
+
+export interface ClipMeta {
+  fps: number
+  duration_s: number
+  total_frames: number
+}
+
+export interface KpiSummary {
+  per_player: Record<string, PlayerDistanceMetrics>
+  spatial_timeseries: Record<string, SpatialFrame>
+  zone_balance_timeseries: Record<string, Record<string, ZoneCounts>>
+  spatial_summary: SpatialSummary
+  clip_meta: ClipMeta
+}

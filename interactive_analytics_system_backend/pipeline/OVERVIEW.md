@@ -25,8 +25,10 @@ app.py
  │    └── pipeline.homography (map_pixel_to_pitch)
  ├── pipeline.trajectories    (interpolate_trajectories)
  │    └── pipeline.config      (OUT_W, OUT_H for canvas clipping)
- └── pipeline.team_classifier (classify_tracks, override_classification)
-      └── pipeline.schemas     (Detection)
+ ├── pipeline.team_classifier (classify_tracks, override_classification)
+ │    └── pipeline.schemas     (Detection)
+ └── pipeline.kpi             (compute_clip_summary, compute_player_distances,
+                                compute_team_spatial, compute_zone_balance)
 ```
 
 ---
@@ -47,6 +49,7 @@ app.py
 | `map_players.py` | Filter ball/referee, map bottom-centre of each bbox through per-frame H |
 | `trajectories.py` | Linear interp → Savitzky-Golay → max-velocity clamp → canvas clip |
 | `team_classifier.py` | Jersey-colour HSV analysis; classifies each track as Ellistown or opposition |
+| `kpi.py` | Spatial + locomotor KPI computation: distances, centroid separation, convex-hull spread, zone balance |
 
 ---
 
@@ -83,6 +86,10 @@ All frame indices are 0-based integers. Dictionaries keyed by frame index use `i
                    → List[PlayerPitchPosition]  (dense, every frame in range)
 7. team_classifier.py  classify_tracks            (optional, post-processing)
                        → Dict[track_id, {team, confidence, mean_hsv}]
+
+8. kpi.py              compute_clip_summary        (optional, post-processing)
+                       → {per_player, spatial_timeseries,
+                          zone_balance_timeseries, spatial_summary, clip_meta}
 ```
 
-Steps 3 and 4 are triggered together by the `POST /homographies/v3` endpoint. Steps 5 and 6 are separate endpoints called in order by the frontend. Step 7 is an independent optional step triggered by the "Classify Teams" button in the frontend — it does not depend on the trajectory data and can be run at any point after tracking.
+Steps 3 and 4 are triggered together by the `POST /homographies/v3` endpoint. Steps 5 and 6 are separate endpoints called in order by the frontend. Step 7 is an independent optional step triggered by the "Classify Teams" button in the frontend — it does not depend on the trajectory data and can be run at any point after tracking. Step 8 is triggered by "Compute KPIs" in the frontend after team classification; it accepts an optional `end_frame` parameter to exclude trailing frames from analysis.

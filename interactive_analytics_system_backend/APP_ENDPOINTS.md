@@ -241,6 +241,33 @@ Return stored team classifications for a video. Tries memory cache first, then d
 
 ---
 
+### `POST /videos/{video_id}/compute-kpis` → `KpiSummary`
+Compute spatial and locomotor KPIs for the clip.
+
+Query params:
+- `end_frame` (optional `int`) — if supplied, positions with `frame_idx > end_frame` are filtered out before computation. This allows the frontend trim slider to exclude trailing frames (e.g. players jogging back after a score) without re-running any pipeline steps.
+
+Steps:
+1. Loads player positions from `store.player_positions_cache`. Raises 404 if not found (run map_players and interpolate first).
+2. Loads team classifications from cache or disk (via `_load_team_classifications`). Defaults to `{}` if none exist — KPI computation still runs but all players appear as `'unclassified'`.
+3. If `end_frame` is set: filters `positions` to `frame_idx <= end_frame`.
+4. Reads `fps` from `store.videos[video_id]`.
+5. Calls `compute_clip_summary(pos_dicts, team_classifications, fps)` in a thread executor.
+6. Returns the full `KpiSummary` dict.
+
+**Returns:** (see `pipeline/KPI.md` for full schema)
+```json
+{
+  "per_player": { "track_id": { "team": "...", "total_distance_m": 0.0 } },
+  "spatial_timeseries": { "frame_idx": { "teams": {...}, "centroid_separation_m": 0.0 } },
+  "zone_balance_timeseries": { "frame_idx": { "team": { "defensive": 0, "middle": 0, "attacking": 0 } } },
+  "spatial_summary": { "centroid_separation_m": { "mean": 0.0, "min": 0.0, "max": 0.0 }, "per_team": {...} },
+  "clip_meta": { "fps": 25.0, "duration_s": 0.0, "total_frames": 0 }
+}
+```
+
+---
+
 ### `POST /videos/{video_id}/classify-teams` body / `PATCH /videos/{video_id}/classify-teams` → dict
 Override the team assignment for a single track.
 

@@ -47,7 +47,19 @@ The backend is a FastAPI application that accepts an uploaded GAA football video
    → produce dense List[PlayerPitchPosition] for the requested frame range
    → merge with existing positions, store in memory
 
-7. Playback
+7. Classify Teams  (optional)
+   POST /videos/{id}/classify-teams
+   → single sequential video pass: group sampled detections by frame_idx,
+     decode each unique frame once, extract jersey HSV colour per track
+   → persist Dict[track_id, {team, confidence, mean_hsv}]
+
+8. Compute KPIs  (optional, after classify-teams)
+   POST /videos/{id}/compute-kpis?end_frame=N
+   → filter positions to frame_idx <= end_frame (if end_frame supplied)
+   → compute per-player distance, per-frame centroid + spread + zone counts
+   → return KpiSummary (spatial_timeseries, zone_balance_timeseries, spatial_summary, clip_meta)
+
+9. Playback
    GET /videos/{id}/players          → all positions (sparse + interpolated)
    GET /videos/{id}/frames/{f}/warped → warped JPEG + pitch reference lines
 ```
@@ -88,6 +100,7 @@ Homographies map directly from **image pixels → pitch-canvas pixels**. Meter v
 | POST | `/videos/{id}/classify-teams` | Classify tracks as Ellistown/opposition by jersey colour |
 | GET | `/videos/{id}/classify-teams` | Return stored team classifications |
 | PATCH | `/videos/{id}/classify-teams` | Override a single track's team assignment |
+| POST | `/videos/{id}/compute-kpis` | Compute spatial + locomotor KPIs; optional `?end_frame=N` trims clip |
 
 ---
 

@@ -103,9 +103,42 @@ Sets `currentFrame` to the first frame that has player positions, so ResultsView
 
 ---
 
+## `hasResults` and the Full-Bleed Layout
+
+```typescript
+const hasResults = playerPositions.length > 0 && videoMetadata !== null && videoFile !== null
+```
+
+When `hasResults` is true the page switches from the normal scrolling pipeline layout to a **full-viewport two-column layout**:
+
+```
+┌─────────────────────┬──────────────────────────────────┐
+│  .pipeline-panel    │  .results-panel                  │
+│  (380 px, fixed)    │  (flex: 1, scrollable)           │
+│  pipeline steps     │  ResultsViewer                   │
+│  + debug log        │                                  │
+└─────────────────────┴──────────────────────────────────┘
+```
+
+The outer div uses `position: fixed; width: 100%; height: 100%` so it sits on top of the normal page flow and fills the entire viewport. `document.body.style.overflow = 'hidden'` is set while `hasResults` is true to prevent the background from scrolling.
+
+### JSX variable extraction
+
+To avoid duplicating the pipeline steps and debug log markup across both layout branches, they are extracted as JSX variables inside the component body:
+
+```typescript
+const pipelineSteps = ( <> {/* steps 1–4 */} </> )
+const debugLogEl = ( <DebugLog ... /> )
+```
+
+Both layout branches (`hasResults` and not) then reference these variables directly. This keeps the conditional rendering logic clean while ensuring only one copy of each section exists.
+
+---
+
 ## Conditional Rendering
 
 - Step 2 (configure) is shown only when video is uploaded and no anchor frames exist yet.
 - Step 3 (annotate) + step 4 (pipeline) are shown when `anchorFrames.length > 0`.
-- Step 5 (results) is shown when `playerPositions.length > 0`.
-- Status bar is shown when `status` or `error` is non-empty.
+- When `hasResults` is true: full-bleed two-column layout (pipeline panel + results panel).
+- When `hasResults` is false: standard scrolling `.container` layout with `.main-content` and `.activity-sidebar`.
+- Status bar is shown when `status` or `error` is non-empty (pipeline layout only).

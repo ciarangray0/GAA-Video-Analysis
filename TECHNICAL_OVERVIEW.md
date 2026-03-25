@@ -73,7 +73,6 @@ GAA-Video-Analysis/
 │       └── index.ts                   ← TypeScript interfaces
 │
 ├── pipeline_testing_and_research/     ← DO NOT MODIFY (diagnostic scripts + test output)
-├── CLAUDE.md                          ← AI assistant context file
 └── TECHNICAL_OVERVIEW.md              ← This file
 ```
 
@@ -202,7 +201,6 @@ On `POST /videos/{id}/track`, the backend runs `run_tracking(video_path)`. This 
 
 **Dispatch:**
 - `GPU_PROVIDER=modal` → sends base64-encoded video to the Modal HTTP endpoint.
-- `GPU_PROVIDER=local` (default) → runs YOLO locally on CPU (very slow, development only).
 
 **Output:** `List[Detection]` with fields: `frame_idx`, `track_id`, `x1, y1, x2, y2`, `confidence`, `class_name`. Saved to `data/tracks/{uuid}.json`.
 
@@ -835,7 +833,7 @@ An experimental `k1` parameter for radial lens distortion was added to the front
 
 ---
 
-## 14. Getting Started for a New Engineer
+## 14. Getting Started on this repo
 
 ### Running Locally
 
@@ -846,7 +844,7 @@ pip install -r requirements.txt
 uvicorn app:app --reload --port 8000
 ```
 
-Default `GPU_PROVIDER=local` will run YOLO on CPU (slow). For GPU inference, set `GPU_PROVIDER=modal` and `GPU_ENDPOINT_URL` after deploying the Modal service.
+For GPU inference, set `GPU_PROVIDER=modal` and `GPU_ENDPOINT_URL` after deploying the Modal service.
 
 **Frontend:**
 ```bash
