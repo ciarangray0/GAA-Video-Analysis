@@ -32,19 +32,9 @@ This function is called by every warped-frame endpoint in `app.py`.
 ## `detect.py`
 
 ### `run_tracking(video_path) → List[Detection]`
-Entry point for all tracking calls. Reads the `GPU_PROVIDER` environment variable:
-- If `GPU_PROVIDER != "local"`: calls `_run_tracking_remote`.
-- If `GPU_PROVIDER == "local"` (default): calls `_run_tracking_local` with a warning log.
 
-### `_run_tracking_remote(video_path) → List[Detection]`
 1. Calls `get_gpu_client()` from `gpu_inference/__init__.py` to get (or create) the singleton `GPUInferenceClient`.
 2. Calls `client.track_video(video_path)`.
-
-### `_run_tracking_local(video_path) → List[Detection]`
-CPU fallback. Imports `ultralytics.YOLO` lazily (raises a helpful error if not installed). Calls `model.track(source, tracker="botsort.yaml", conf=0.35, device="cpu")`. Streams results frame by frame and converts each detection to a `Detection` object. The `class_name` is looked up from `model.names` dict.
-
-**Note:** Local CPU inference is very slow on full-length videos. It is intended only for development/testing. The remote Modal GPU path is the production path.
-
 ---
 
 ## YOLO Model
@@ -54,7 +44,7 @@ The model (`v8s_960_v9.pt`) is a custom YOLOv8-small trained at 960px resolution
 - `"Ball-labelers"` — the ball
 - `"Refree-lablers"` — referees
 
-Class names contain deliberate typos that match the training labels — these must not be corrected.
+Class names contain deliberate typos that match the types I accidentally on the training labels.
 
 BotSort (included in Ultralytics) provides persistent track IDs across frames. The `tracker="botsort.yaml"` argument tells Ultralytics to use BotSort instead of the default ByteTrack.
 
@@ -64,7 +54,6 @@ BotSort (included in Ultralytics) provides persistent track IDs across frames. T
 
 | Value | Behaviour |
 |-------|-----------|
-| `"local"` (default) | Runs YOLO locally on CPU |
 | `"modal"` | Sends video to Modal GPU service via HTTP |
 
 When using Modal, `GPU_ENDPOINT_URL` must also be set to the deployed Modal endpoint URL (printed when running `modal deploy modal_yolo.py`).
