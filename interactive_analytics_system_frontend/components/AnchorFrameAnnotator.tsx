@@ -82,7 +82,6 @@ export default function AnchorFrameAnnotator({
   const [selectedLineId, setSelectedLineId] = useState<string>('20m_top')
   const [pendingLinePoint1, setPendingLinePoint1] = useState<{ x: number; y: number } | null>(null)
   const [pendingFrameClick, setPendingFrameClick] = useState<{ x: number; y: number } | null>(null)
-  const [copyStatus, setCopyStatus] = useState('')
   const [zoom, setZoom] = useState(1)
   const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 })
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null)
@@ -363,14 +362,6 @@ export default function AnchorFrameAnnotator({
     onAnchorFramesChange(updated)
   }
 
-  const swapAnchorFrame = (newFrameIdx: number) => {
-    if (newFrameIdx < 0 || newFrameIdx >= videoMetadata.num_frames) return
-    const updated = [...anchorFrames]
-    updated[currentAnchorIdx] = { frame_idx: newFrameIdx, isSkipped: false, points: [], lines: [] }
-    onAnchorFramesChange(updated)
-    loadFrameImage(newFrameIdx)
-  }
-
   const removePoint = (pointIdx: number) => {
     const updated = [...anchorFrames]
     updated[currentAnchorIdx] = {
@@ -387,36 +378,6 @@ export default function AnchorFrameAnnotator({
       lines: updated[currentAnchorIdx].lines.filter((_, i) => i !== lineIdx),
     }
     onAnchorFramesChange(updated)
-  }
-
-  const copyFromPrevious = () => {
-    let srcIdx = currentAnchorIdx - 1
-    while (srcIdx >= 0 && anchorFrames[srcIdx].isSkipped) srcIdx--
-    if (srcIdx < 0 || anchorFrames[srcIdx].points.length === 0) return
-    const updated = [...anchorFrames]
-    updated[currentAnchorIdx] = {
-      ...updated[currentAnchorIdx],
-      points: [...anchorFrames[srcIdx].points],
-      lines: [...(anchorFrames[srcIdx].lines || [])],
-    }
-    onAnchorFramesChange(updated)
-    setCopyStatus('Copied from previous')
-    setTimeout(() => setCopyStatus(''), 2000)
-  }
-
-  const copyFromNext = () => {
-    let srcIdx = currentAnchorIdx + 1
-    while (srcIdx < anchorFrames.length && anchorFrames[srcIdx].isSkipped) srcIdx++
-    if (srcIdx >= anchorFrames.length || anchorFrames[srcIdx].points.length === 0) return
-    const updated = [...anchorFrames]
-    updated[currentAnchorIdx] = {
-      ...updated[currentAnchorIdx],
-      points: [...anchorFrames[srcIdx].points],
-      lines: [...(anchorFrames[srcIdx].lines || [])],
-    }
-    onAnchorFramesChange(updated)
-    setCopyStatus('Copied from next')
-    setTimeout(() => setCopyStatus(''), 2000)
   }
 
   const exportAnnotations = () => {
@@ -554,28 +515,7 @@ export default function AnchorFrameAnnotator({
             <button onClick={toggleSkipFrame} className={currentAnchor.isSkipped ? 'warning' : ''}>
               {currentAnchor.isSkipped ? 'Unskip Frame' : 'Skip Frame'}
             </button>
-            <button onClick={() => {
-              const newFrame = prompt('Enter new frame number:', String(currentAnchor.frame_idx))
-              if (newFrame) swapAnchorFrame(parseInt(newFrame))
-            }}>
-              Swap Frame
-            </button>
-            <button
-              onClick={copyFromPrevious}
-              disabled={currentAnchorIdx === 0 || !anchorFrames.slice(0, currentAnchorIdx).some(f => !f.isSkipped && f.points.length > 0)}
-              title="Copy annotations from the previous non-skipped frame"
-            >
-              ← Copy Previous
-            </button>
-            <button
-              onClick={copyFromNext}
-              disabled={currentAnchorIdx === anchorFrames.length - 1 || !anchorFrames.slice(currentAnchorIdx + 1).some(f => !f.isSkipped && f.points.length > 0)}
-              title="Copy annotations from the next non-skipped frame"
-            >
-              Copy Next →
-            </button>
           </div>
-          {copyStatus && <span style={{ marginLeft: 8, fontSize: 12, color: '#44ff44' }}>{copyStatus}</span>}
         </div>
       )}
 
@@ -589,13 +529,13 @@ export default function AnchorFrameAnnotator({
                 className={`mode-btn ${annotationMode === 'point' ? 'active' : ''}`}
                 onClick={() => { setAnnotationMode('point'); setPendingLinePoint1(null) }}
               >
-                📍 Point Mode
+                 Point Mode
               </button>
               <button
                 className={`mode-btn ${annotationMode === 'line' ? 'active' : ''}`}
                 onClick={() => { setAnnotationMode('line'); setPendingFrameClick(null) }}
               >
-                📏 Line Mode
+                  Line Mode
               </button>
             </div>
 
@@ -624,7 +564,7 @@ export default function AnchorFrameAnnotator({
                 </p>
               ) : (
                 <p className="line-mode-instruction">
-                  📏 <strong>Line Mode:</strong> Click two points on the <em>{AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}</em> in the video frame.
+                  <strong>Line Mode:</strong> Click two points on the <em>{AVAILABLE_LINES[selectedLineId]?.label || selectedLineId}</em> in the video frame.
                   <br />
                   <small>Line constraints improve homography accuracy in midfield regions where point intersections aren't visible.</small>
                 </p>
@@ -636,7 +576,7 @@ export default function AnchorFrameAnnotator({
                 <button onClick={() => setPendingFrameClick(null)} className="cancel-btn">Cancel</button>
               </p>
             ) : (
-              <p>📍 <strong>Point Mode:</strong> Click a feature in the video frame, then select the matching location on the pitch diagram.</p>
+              <p> <strong>Point Mode:</strong> Click a feature in the video frame, then select the matching location on the pitch diagram.</p>
             )}
           </div>
 
@@ -724,7 +664,7 @@ export default function AnchorFrameAnnotator({
           {/* Lines list */}
           {currentAnchor && currentAnchor.lines && currentAnchor.lines.length > 0 && (
             <div className="lines-list">
-              <h4>📏 Annotated Lines ({currentAnchor.lines.length}):</h4>
+              <h4> Annotated Lines ({currentAnchor.lines.length}):</h4>
               <div className="lines-grid">
                 {currentAnchor.lines.map((line, idx) => (
                   <div key={idx} className="line-item">

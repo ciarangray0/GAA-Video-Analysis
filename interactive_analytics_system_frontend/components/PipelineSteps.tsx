@@ -151,7 +151,7 @@ export default function PipelineSteps({
       const data = await res.json()
       const detections = await getDetections(videoMetadata.video_id)
       onStepAComplete({ frames_processed: data.frames_processed, tracks: data.tracks, num_detections: detections.length })
-      onStepsMarkedStale(['B', 'C', 'D'])
+      onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['A'])
     } catch (err: any) {
       onError(err.message || 'Tracking failed')
@@ -163,8 +163,7 @@ export default function PipelineSteps({
   const runStepB = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
 
-    // A frame is usable if it has any manual points OR any line annotations —
-    // line intersections will derive the required keypoints automatically.
+    // A frame is usable if it has any manual points OR any line annotations
     const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
       .filter(af => !af.isSkipped && (af.points.length > 0 || (af.lines || []).length > 0))
       .map(af => ({ frame_idx: af.frame_idx, points: af.points, lines: af.lines || [] }))

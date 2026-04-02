@@ -28,23 +28,6 @@ export async function getDetections(videoId: string): Promise<any[]> {
   return res.json()
 }
 
-export async function computeHomographiesV2(
-  videoId: string,
-  annotations: AnchorFrameAnnotation[],
-): Promise<{ frames: number[]; info: Record<string, any> }> {
-  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/v2`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(annotations),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Homography computation failed')
-  }
-  const data = await res.json()
-  return { frames: data.frames || [], info: data.info || {} }
-}
-
 export async function mapPlayers(videoId: string): Promise<PlayerPosition[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/map_players`, { method: 'POST' })
   if (!res.ok) {
