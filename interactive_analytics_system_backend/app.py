@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-import json
 import cv2
 import numpy as np
 import logging
@@ -36,6 +35,16 @@ from pipeline.map_players import map_players_to_pitch, filter_detections_for_map
 from pipeline.trajectories import interpolate_trajectories
 from pipeline.video import get_video_metadata, extract_frame
 from pipeline.gaa_pitch_config import GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
+from pipeline.persistence import (
+    VIDEOS_DIR, TRACKS_DIR, ANNOTATIONS_DIR,
+    ensure_dirs,
+    save_video_meta, save_video_file,
+    save_detections, load_detections,
+    save_homography_dict, load_homography_dict,
+    save_annotations, load_annotations,
+    save_team_classifications, load_team_classifications,
+    restore_videos_from_disk,
+)
 from store import store
 
 logging.basicConfig(level=logging.INFO)
@@ -44,33 +53,19 @@ logger = logging.getLogger(__name__)
 MAX_VIDEO_SIZE_MB = int(os.getenv("MAX_VIDEO_SIZE_MB", "500"))
 MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-
-VIDEOS_DIR = DATA_DIR / "videos"
-TRACKS_DIR = DATA_DIR / "tracks"
-ANNOTATIONS_DIR = DATA_DIR / "annotations"
 
 
 def _restore_videos_from_disk() -> None:
     """Repopulate store.videos from saved metadata files after a backend restart."""
-    for meta_path in VIDEOS_DIR.glob("*_meta.json"):
-        meta = _load_json(meta_path)
-        if meta is None:
-            continue
-        video_id = meta.get("video_id")
-        video_path = Path(meta.get("path", ""))
-        if not video_id or not video_path.exists():
-            continue
-        store.videos[video_id] = {k: v for k, v in meta.items() if k != "video_id"}
+    videos = restore_videos_from_disk()
+    store.videos.update(videos)
     if store.videos:
         logger.info(f"Restored {len(store.videos)} video(s) from disk on startup")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-    TRACKS_DIR.mkdir(parents=True, exist_ok=True)
-    ANNOTATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dirs()
     _restore_videos_from_disk()
     yield
 
@@ -100,26 +95,6 @@ def _get_video_or_404(video_id: str) -> dict:
     return store.videos[video_id]
 
 
-def _save_json(path: Path, data) -> None:
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _load_json(path: Path):
-    if path.exists():
-        with open(path) as f:
-            return json.load(f)
-    return None
-
-
-def _serialize_H(h_dict: Dict[int, np.ndarray]) -> dict:
-    return {str(k): v.tolist() for k, v in h_dict.items()}
-
-
-def _deserialize_H(data: dict) -> Dict[int, np.ndarray]:
-    return {int(k): np.array(v) for k, v in data.items()}
-
-
 def validate_video_upload(file: UploadFile, content: bytes) -> None:
     if len(content) > MAX_VIDEO_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {MAX_VIDEO_SIZE_MB}MB")
@@ -129,60 +104,9 @@ def validate_video_upload(file: UploadFile, content: bytes) -> None:
         raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}. Expected video/mp4")
 
 
-def save_video_meta(video_id: str, meta: dict) -> None:
-    _save_json(VIDEOS_DIR / f"{video_id}_meta.json", {"video_id": video_id, **meta})
-
-
-def save_detections(video_id: str, detections: List[Detection]) -> None:
-    _save_json(TRACKS_DIR / f"{video_id}.json", [d.model_dump() for d in detections])
-
-
-def load_detections(video_id: str) -> Optional[List[Detection]]:
-    data = _load_json(TRACKS_DIR / f"{video_id}.json")
-    return [Detection(**d) for d in data] if data is not None else None
-
-
-def _save_homography_dict(video_id: str, key: str, h_dict: Dict[int, np.ndarray]) -> None:
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_{key}.json", _serialize_H(h_dict))
-
-
-def _load_homography_dict(video_id: str, key: str) -> Optional[Dict[int, np.ndarray]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_{key}.json")
-    return _deserialize_H(data) if data is not None else None
-
-
-
-def _serialise_ann_value(obj) -> Any:
-    """Convert a PitchPoint/LineAnnotation or dict to a JSON-serialisable dict."""
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    return obj
-
-
-def save_annotations(video_id: str, annotations_dict: dict) -> None:
-    serialisable = {
-        str(frame_idx): {
-            "keypoints": [_serialise_ann_value(p) for p in ann.get("keypoints", [])],
-            "lines": [_serialise_ann_value(ln) for ln in ann.get("lines", [])],
-        }
-        for frame_idx, ann in annotations_dict.items()
-    }
-    _save_json(ANNOTATIONS_DIR / f"{video_id}_annotations.json", serialisable)
-
-
-def load_annotations(video_id: str) -> Optional[dict]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_annotations.json")
-    return {int(k): v for k, v in data.items()} if data is not None else None
-
-
-def _load_team_classifications(video_id: str) -> Optional[Dict[int, dict]]:
-    data = _load_json(ANNOTATIONS_DIR / f"{video_id}_team_classifications.json")
-    return {int(k): v for k, v in data.items()} if data is not None else None
-
-
 def _resolve_homography(video_id: str, frame_idx: int) -> Optional[np.ndarray]:
     """Return the per-frame v3 homography for a frame (nearest if exact frame missing)."""
-    v3_hs = store.v3_per_frame_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_homographies")
+    v3_hs = store.v3_per_frame_H_cache.get(video_id) or load_homography_dict(video_id, "v3_homographies")
     if not v3_hs:
         return None
     if frame_idx in v3_hs:
@@ -262,9 +186,7 @@ async def upload_video(file: UploadFile = File(...)):
     validate_video_upload(file, content)
 
     video_id = str(uuid.uuid4())
-    video_path = VIDEOS_DIR / f"{video_id}.mp4"
-    with open(video_path, "wb") as f:
-        f.write(content)
+    video_path = save_video_file(video_id, content)
 
     try:
         metadata = get_video_metadata(str(video_path))
@@ -347,7 +269,7 @@ async def get_warped_frame_any(
         if players:
             classifications = (
                 store.team_classifications_cache.get(video_id)
-                or _load_team_classifications(video_id)
+                or load_team_classifications(video_id)
                 or {}
             )
             for pos in (p for p in store.player_positions_cache.get(video_id, []) if p.frame_idx == frame_idx):
@@ -510,7 +432,7 @@ async def compute_homographies_v3(
         )
 
     store.v3_anchor_H_cache[video_id] = anchor_homographies
-    _save_homography_dict(video_id, "v3_anchor_homographies", anchor_homographies)
+    save_homography_dict(video_id, "v3_anchor_homographies", anchor_homographies)
     save_annotations(video_id, annotations_dict)
 
     try:
@@ -532,7 +454,7 @@ async def compute_homographies_v3(
         per_frame_hs = anchor_homographies
 
     store.v3_per_frame_H_cache[video_id] = per_frame_hs
-    _save_homography_dict(video_id, "v3_homographies", per_frame_hs)
+    save_homography_dict(video_id, "v3_homographies", per_frame_hs)
 
     logger.info(
         f"v3 DLT: computed {len(anchor_homographies)} anchor Hs + {len(per_frame_hs)} per-frame Hs "
@@ -575,11 +497,11 @@ async def map_players(video_id: str):
     if detections is None:
         raise HTTPException(status_code=400, detail="No detections found. Run tracking first.")
 
-    homographies = store.v3_per_frame_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_homographies")
+    homographies = store.v3_per_frame_H_cache.get(video_id) or load_homography_dict(video_id, "v3_homographies")
     if homographies is None:
         raise HTTPException(status_code=400, detail="No homographies found. Compute homographies first.")
 
-    anchor_hs = store.v3_anchor_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_anchor_homographies")
+    anchor_hs = store.v3_anchor_H_cache.get(video_id) or load_homography_dict(video_id, "v3_anchor_homographies")
     anchor_frame_indices = set(anchor_hs.keys()) if anchor_hs else None
 
     try:
@@ -611,7 +533,7 @@ async def get_anchor_quality(video_id: str):
     if annotations is None:
         raise HTTPException(status_code=400, detail="No annotations found. Compute homographies first.")
 
-    anchor_hs = store.v3_anchor_H_cache.get(video_id) or _load_homography_dict(video_id, "v3_anchor_homographies")
+    anchor_hs = store.v3_anchor_H_cache.get(video_id) or load_homography_dict(video_id, "v3_anchor_homographies")
     if not anchor_hs:
         raise HTTPException(status_code=400, detail="No anchor homographies found. Compute homographies first.")
 
@@ -788,10 +710,7 @@ async def classify_teams(video_id: str):
         raise HTTPException(status_code=500, detail=f"Team classification failed: {str(e)}")
 
     store.team_classifications_cache[video_id] = classifications
-    _save_json(
-        ANNOTATIONS_DIR / f"{video_id}_team_classifications.json",
-        {str(k): v for k, v in classifications.items()},
-    )
+    save_team_classifications(video_id, classifications)
 
     confidences = [v["confidence"] for v in classifications.values()]
     ellistown_ids = [tid for tid, v in classifications.items() if v["team"] == "ellistown"]
@@ -829,7 +748,7 @@ async def get_team_classifications(video_id: str):
 
     classifications = (
         store.team_classifications_cache.get(video_id)
-        or _load_team_classifications(video_id)
+        or load_team_classifications(video_id)
     )
     if classifications is None:
         raise HTTPException(status_code=404, detail="No team classifications found. Run classify-teams first.")
@@ -853,7 +772,7 @@ async def compute_kpis(video_id: str, end_frame: Optional[int] = Query(None)):
 
     team_classifications = (
         store.team_classifications_cache.get(video_id)
-        or _load_team_classifications(video_id)
+        or load_team_classifications(video_id)
         or {}
     )
 
@@ -895,16 +814,13 @@ async def override_team_classification(video_id: str, body: TeamOverrideRequest)
 
     classifications = (
         store.team_classifications_cache.get(video_id)
-        or _load_team_classifications(video_id)
+        or load_team_classifications(video_id)
         or {}
     )
 
     classifications = override_classification(classifications, body.track_id, body.team)
     store.team_classifications_cache[video_id] = classifications
-    _save_json(
-        ANNOTATIONS_DIR / f"{video_id}_team_classifications.json",
-        {str(k): v for k, v in classifications.items()},
-    )
+    save_team_classifications(video_id, classifications)
 
     logger.info(f"Track {body.track_id} reassigned to '{body.team}' for video {video_id}")
     return {"classifications": {str(k): v for k, v in classifications.items()}}
