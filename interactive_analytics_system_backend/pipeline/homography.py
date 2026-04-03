@@ -55,10 +55,6 @@ def _compute_coverage_score(
     return round(len(occupied) / (grid_cols * grid_rows), 2)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _hartley_normalize(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Normalize points so centroid = origin and mean distance from origin = √2.
 
@@ -108,22 +104,6 @@ def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
         f"Unrecognized pitch_id: '{pitch_id}'. "
         "Must be a known vertex name or follow the 'line_<name>_x<X>_y<Y>' format."
     )
-
-
-def compute_homography(
-    pts_image: np.ndarray,
-    pts_pitch_canvas: np.ndarray,
-) -> np.ndarray:
-    """Compute a 3×3 homography matrix (image pixels → pitch canvas pixels)."""
-    H, _ = cv2.findHomography(
-        pts_image.astype(np.float32),
-        pts_pitch_canvas.astype(np.float32),
-        cv2.RANSAC,
-        5.0,
-    )
-    if H is None:
-        raise ValueError("Failed to compute homography")
-    return H
 
 
 def map_pixel_to_pitch(

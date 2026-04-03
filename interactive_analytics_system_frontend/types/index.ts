@@ -107,3 +107,35 @@ export interface KpiSummary {
   spatial_summary: SpatialSummary
   clip_meta: ClipMeta
 }
+
+export interface AnchorQualityPoint {
+  pitch_id: string
+  x_img: number
+  y_img: number
+  error_px: number
+  verdict: 'good' | 'high' | 'outlier'
+  impact: 'helpful' | 'marginal' | 'harmful'
+}
+
+export interface AnchorQualityFrame {
+  frame_idx: number
+  n_keypoints: number
+  n_lines: number
+  mean_error_px: number
+  max_error_px: number
+  n_outlier_points: number
+  n_helpful_points: number
+  overall_quality: 'good' | 'warning' | 'bad'
+  keypoints: AnchorQualityPoint[]
+  recommendation: string
+}
+
+export interface AnchorQualityData {
+  anchors: AnchorQualityFrame[]
+}
+
+export interface HomographyComputeResult {
+  frames: number[]
+  per_frame_count: number
+  info: Record<string, any>
+}

@@ -85,7 +85,7 @@ class YOLOTracker:
             raise FileNotFoundError(
                 f"Model not found at {model_path}. Upload with: modal volume put yolo-model-cache v8s_960_v9.pt /v8s_960_v9.pt")
 
-    def _run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
+    def \_run_tracking(self, video_bytes: bytes) -> List[Dict[str, Any]]:
         """
         Internal method to run YOLO + BotSort on video bytes.
 

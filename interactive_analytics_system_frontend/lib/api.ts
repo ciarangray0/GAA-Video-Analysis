@@ -1,4 +1,4 @@
-import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications, KpiSummary } from '../types'
+import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications, KpiSummary, AnchorQualityData, HomographyComputeResult } from '../types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -24,7 +24,10 @@ export async function trackVideo(videoId: string): Promise<{ frames_processed: n
 
 export async function getDetections(videoId: string): Promise<any[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/detections`)
-  if (!res.ok) return []
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to fetch detections')
+  }
   return res.json()
 }
 
@@ -113,6 +116,36 @@ export async function computeKpis(videoId: string, endFrame?: number): Promise<K
   if (!res.ok) {
     const err = await res.json()
     throw new Error(err.detail || 'KPI computation failed')
+  }
+  return res.json()
+}
+
+export async function computeHomographies(
+  videoId: string,
+  annotations: AnchorFrameAnnotation[],
+): Promise<HomographyComputeResult> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/v3`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(annotations),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Homography computation failed')
+  }
+  const data = await res.json()
+  return {
+    frames: data.frames || [],
+    per_frame_count: data.per_frame_count ?? (data.frames || []).length,
+    info: data.info || {},
+  }
+}
+
+export async function getAnchorQuality(videoId: string): Promise<AnchorQualityData> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/anchor-quality`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Anchor quality fetch failed')
   }
   return res.json()
 }

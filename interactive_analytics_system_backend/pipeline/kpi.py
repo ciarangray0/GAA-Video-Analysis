@@ -23,15 +23,15 @@ from typing import Dict, List
 
 import numpy as np
 
+from pipeline.gaa_pitch_config import GAA_PITCH_LENGTH, PITCH_SCALE
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-PX_PER_METRE = 10.0           # 10 px == 1 m  (850×1400 canvas == 85×140 m)
-
-PITCH_LENGTH_M = 140.0
-THIRD_1_END_M = PITCH_LENGTH_M / 3.0        # 46.667 m — end of defensive third
-THIRD_2_END_M = 2.0 * PITCH_LENGTH_M / 3.0  # 93.333 m — end of middle third
+PX_PER_METRE = PITCH_SCALE                             # 10 px / m
+THIRD_1_END_M = GAA_PITCH_LENGTH / 3.0        # 46.667 m — end of defensive third
+THIRD_2_END_M = 2.0 * GAA_PITCH_LENGTH / 3.0  # 93.333 m — end of middle third
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,8 @@ if "ultralytics" not in sys.modules:
     sys.modules["ultralytics"] = ultralytics_stub
 
 from pipeline.schemas import Detection, PitchAnnotation, PitchPoint, PlayerPitchPosition, LineAnnotation, AnchorFrameAnnotation
-from app import app, VIDEOS_DIR, TRACKS_DIR, ANNOTATIONS_DIR
+from app import app
+import pipeline.persistence as _persistence
 
 
 @pytest.fixture(autouse=True)
@@ -34,9 +35,9 @@ def use_temp_dirs(tmp_path, monkeypatch):
     temp_tracks.mkdir(parents=True)
     temp_annotations.mkdir(parents=True)
 
-    monkeypatch.setattr("app.VIDEOS_DIR", temp_videos)
-    monkeypatch.setattr("app.TRACKS_DIR", temp_tracks)
-    monkeypatch.setattr("app.ANNOTATIONS_DIR", temp_annotations)
+    monkeypatch.setattr(_persistence, "VIDEOS_DIR", temp_videos)
+    monkeypatch.setattr(_persistence, "TRACKS_DIR", temp_tracks)
+    monkeypatch.setattr(_persistence, "ANNOTATIONS_DIR", temp_annotations)
 
     yield
 
@@ -128,16 +129,8 @@ def sample_video_metadata(monkeypatch):
         }
     # Patch both pipeline.video.get_video_metadata and the name imported into app
     monkeypatch.setattr("pipeline.video.get_video_metadata", fake_metadata)
-    monkeypatch.setattr("app.get_video_metadata", fake_metadata)
+    monkeypatch.setattr("routes.videos.get_video_metadata", fake_metadata)
     return fake_metadata
-
-
-@pytest.fixture
-def mock_gpu_tracking(monkeypatch, sample_detections):
-    """Mock GPU tracking to return sample detections."""
-    # Patch run_tracking in detect module to return sample detections
-    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
-    return sample_detections
 
 
 @pytest.fixture(autouse=True)
