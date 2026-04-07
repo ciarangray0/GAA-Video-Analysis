@@ -13,7 +13,7 @@ export const PITCH_DISPLAY_WIDTH  = Math.round(PITCH_CANVAS_W * DISPLAY_SCALE)  
 export const PITCH_DISPLAY_HEIGHT = Math.round(PITCH_CANVAS_H * DISPLAY_SCALE)  // 560
 
 // ---------------------------------------------------------------------------
-// Vertices — matches GAA_PITCH_VERTICES in gaa_pitch_config.py exactly
+// Vertices — matches GAA_PITCH_VERTICES in gaa_pitch_config.py
 // [x_meters, y_meters]
 // ---------------------------------------------------------------------------
 export const GAA_PITCH_VERTICES: Record<string, [number, number]> = {
@@ -83,7 +83,7 @@ export const GAA_PITCH_VERTICES: Record<string, [number, number]> = {
 }
 
 // ---------------------------------------------------------------------------
-// Horizontal lines — matches GAA_PITCH_LINES in gaa_pitch_config.py exactly
+// Horizontal lines — matches GAA_PITCH_LINES in gaa_pitch_config.py
 // name → y_meters
 // ---------------------------------------------------------------------------
 export const GAA_PITCH_LINES: Record<string, number> = {
@@ -103,7 +103,7 @@ export const GAA_PITCH_LINES: Record<string, number> = {
 }
 
 // ---------------------------------------------------------------------------
-// Vertical lines — matches GAA_PITCH_SIDELINES in gaa_pitch_config.py exactly
+// Vertical lines — matches GAA_PITCH_SIDELINES in gaa_pitch_config.py
 // name → x_meters
 // ---------------------------------------------------------------------------
 export const GAA_PITCH_SIDELINES: Record<string, number> = {
@@ -117,7 +117,7 @@ export const GAA_PITCH_SIDELINES: Record<string, number> = {
 
 // ---------------------------------------------------------------------------
 // Symmetric line pairs (top_y, bottom_y) used when drawing the pitch diagram.
-// Derived from GAA_PITCH_LINES so there is no duplication.
+// Derived from GAA_PITCH_LINES
 // ---------------------------------------------------------------------------
 export const PITCH_SYMMETRIC_LINE_PAIRS: ReadonlyArray<readonly [number, number]> = [
   [GAA_PITCH_LINES['13m_top'],  GAA_PITCH_LINES['13m_bottom']],

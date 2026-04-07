@@ -1,5 +1,8 @@
-# gaa_pitch_config.py
+"""GAA pitch geometry constants — single source of truth for all spatial parameters.
 
+All distances are in metres; canvas dimensions are in pixels at PITCH_SCALE px/m.
+The TypeScript equivalent lives in Interactive_analytics_system_frontend/lib/pitchConfig.ts.
+"""
 GAA_PITCH_LENGTH = 140.0  # meters  (y)
 GAA_PITCH_WIDTH  = 85.0   # meters (x)
 

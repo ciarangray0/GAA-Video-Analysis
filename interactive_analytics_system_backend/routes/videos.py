@@ -1,10 +1,9 @@
 """Video upload and frame serving endpoints."""
+import logging
 import os
 import uuid
-import logging
 
 import cv2
-import numpy as np
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
@@ -25,6 +24,7 @@ MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024
 
 
 def validate_video_upload(file: UploadFile, content: bytes) -> None:
+    """Raise HTTPException if the upload exceeds size limit or is not an MP4."""
     if len(content) > MAX_VIDEO_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {MAX_VIDEO_SIZE_MB}MB")
     if not file.filename or not file.filename.lower().endswith(".mp4"):

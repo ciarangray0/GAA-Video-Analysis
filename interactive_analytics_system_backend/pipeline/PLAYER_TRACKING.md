@@ -1,139 +1,174 @@
 # Player Tracking Module
 
-Covers `map_players.py` (filtering and mapping detections to pitch coordinates) and `trajectories.py` (interpolation and smoothing).
+Covers `map_players.py` (filtering raw detections and projecting players onto the pitch diagram) and `trajectories.py` (filling gaps and smoothing those positions for playback).
+
+---
+
+## The big picture — what problem are we solving?
+
+YOLO+BotSort watches every video frame and outputs a list of bounding boxes. Each box says "there is something at these pixel coordinates in frame N, and I think it belongs to track ID 42". That is all it knows — pixel coordinates in the camera image.
+
+We need pitch coordinates, not camera pixels. We also need a position for every frame, not just the frames where the detector fired. And we need to throw away anything that is not actually a player (the ball, referees).
+
+These two files handle those three jobs in order:
+
+1. `map_players.py` — filter junk, then project each detection onto the pitch canvas
+2. `trajectories.py` — fill the gaps with interpolation, then smooth the resulting paths
 
 ---
 
 ## `map_players.py`
 
-### Purpose
-Takes the raw YOLO+BotSort detections and a per-frame homography dict, and produces pitch-canvas pixel positions for every player in every frame.
+### Why feet, not the centre of the box?
 
----
+Imagine you are looking at a person from a slightly raised angle — the camera is mounted high in a stadium, not directly overhead. The person's head is farther from the ground than their feet. If you project the centre of the bounding box onto the pitch plane, you are projecting a point that is roughly at chest height. Because the camera is angled, chest height and ground level are at different places in the image — the chest projects to a point several meters away from where the player actually is standing.
 
-### `filter_detections_for_mapping(detections) → List[Detection]`
+Projecting the bottom-centre of the bounding box (directly below the midpoint at the lowest pixel row) gives you approximately where the player's feet touch the grass. Feet are on the ground plane, and the homography was estimated for the ground plane, so this is the only point guaranteed to project correctly.
 
-Removes non-player detections before mapping.
-
-**Rules:**
-1. Any detection with `class_name == CLASS_BALL` is dropped outright. Ball detections are meaningless for player tracking.
-2. Any `track_id` that has **at least one** detection classified as `CLASS_REFEREE` is flagged as a referee track. **All** detections for that `track_id` (including frames where it was misclassified as a player) are dropped.
-
-The whole-track referee removal is important because BotSort maintains track identity across frames. A referee may be occasionally misclassified as a player in some frames; if the track ID is dropped globally, these misclassifications are cleaned up automatically.
-
-Logs a summary of what was dropped.
-
----
-
-### `map_players_to_pitch(detections, homographies, anchor_frame_indices=None) → List[PlayerPitchPosition]`
-
-Maps each detection's **bottom-centre** bounding box point to pitch-canvas coordinates.
-
-**Bottom-centre formula:**
-```python
-x_foot = (det.x1 + det.x2) / 2   # horizontal centre of bbox
-y_foot = det.y2                    # bottom edge of bbox
-x_pitch, y_pitch = map_pixel_to_pitch(x_foot, y_foot, H)
+```
+Bottom-centre formula:
+    x_foot = (x1 + x2) / 2    ← midpoint of left and right edges of the box
+    y_foot = y2                ← the very bottom row of the box
 ```
 
-The bottom-centre approximates where the player's feet contact the ground. The feet are the correct contact point for projecting a standing player onto the pitch plane — using the head centre or bbox centre would introduce systematic error because the camera is not directly overhead.
+For a box from pixel (300, 100) to pixel (360, 220), the foot point is (330, 220).
 
-**Source labels:**
-- `"homography"` — the detection's frame matches an anchor frame in `anchor_frame_indices`.
-- `"homography_interp"` — the frame uses a propagated (optical-flow-derived) H. Used by the interpolation step to select which positions to interpolate between.
+---
 
-If `anchor_frame_indices` is `None`, all positions get `"homography"`.
+### `filter_detections_for_mapping` — removing noise before projection
 
-Detections whose frame has no homography entry are silently skipped.
+Before projecting anything, we clean the detection list.
+
+**Rule 1 — Drop the ball.**
+The ball is a detection with `class_name == CLASS_BALL`. We have no interest in mapping the ball to the pitch (it does not sit on the ground plane reliably), so every ball detection is removed outright.
+
+**Rule 2 — Drop referee tracks entirely.**
+This one is trickier. The tracker assigns each person a `track_id` that persists across many frames. A referee wearing a distinctive coloured jersey will usually get classified as a referee. But because detectors are imperfect, the same physical person might be labelled "player" in frame 45 and "referee" in frame 60.
+
+If we only dropped frames labelled "referee", we would keep the frame-45 detection — which is still a referee. That ghost detection would appear as a rogue player on the pitch diagram.
+
+The fix: if a track ID has **ever** been labelled "referee" in any frame, drop **all** detections for that track ID, including the ones labelled "player". The reasoning is that a real player's track will never touch the referee label, so any track that does must belong to a referee.
+
+```
+Pseudocode:
+    referee_track_ids = { det.track_id for det in detections if det.class_name == "referee" }
+    keep = [ det for det in detections
+             if det.class_name != "ball"
+             and det.track_id not in referee_track_ids ]
+```
+
+---
+
+### `map_players_to_pitch` — the actual projection
+
+Once the list is clean, each detection is projected through a homography matrix (a 3×3 transformation that maps camera pixels to pitch canvas pixels).
+
+The function looks up which homography to use for a given frame index. If the frame is an anchor frame (a frame the user annotated), it uses that frame's own homography directly. For every other frame it uses a propagated homography — one that was estimated by optical flow from the nearest anchor. The `source` label records which case applied:
+
+- `"homography"` — directly computed from user annotations on this exact frame
+- `"homography_interp"` — propagated from a nearby anchor via optical flow
+
+This label matters later. The trajectory builder uses it to know which positions were "solid ground truth" and which were estimated.
+
+If a frame has no homography at all (this can happen if propagation failed for that frame), the detection is silently skipped. No crash, just no output.
 
 ---
 
 ## `trajectories.py`
 
-### Purpose
-Converts the sparse, per-detection player positions into dense, smoothed trajectories for playback.
+### The problem: gaps and jitter
 
-### Module-level constants
+After projection, a typical player might have pitch positions in frames 0, 1, 2, 5, 6, 10, 11... with gaps at 3, 4, 7, 8, 9. The detector missed them (blur, occlusion, being out of frame). Playback at 25 fps needs a position for every single frame, so we have to fill in the missing ones.
 
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `_DEFAULT_MAX_VEL_PX` | `4.0` | Max displacement per frame (px) |
-| `_DEFAULT_SG_LONG_WIN` | `15` | SG window for tracks >20 frames |
-| `_DEFAULT_SG_MID_WIN` | `11` | SG window for tracks 10–20 frames |
-| `_SG_LONG_TRACK_MIN` | `20` | Length threshold for "long" track category |
-| `_SG_MID_TRACK_MIN` | `10` | Length threshold for "mid" track category |
+We also have a noise problem. Even on frames where the detector did fire, the bounding box wobbles slightly from frame to frame — the player is standing still but the box shifts 2–3 pixels because of detector variance. Plotted as a trajectory this looks like vibration. A smoothing filter removes it.
 
-The max-velocity default of 4 px/frame corresponds to 10 m/s at 10 px/m and 25 fps — approximately the maximum sprint speed in Gaelic football.
+The pipeline applies three steps in order: linear interpolation, Savitzky-Golay smoothing, velocity clamping.
 
 ---
 
-### `_sg_window(n_frames, long_win, mid_win) → Optional[int]`
+### Step 1 — Linear interpolation
 
-Selects the Savitzky-Golay window for a track of `n_frames` length:
+Think of it like connecting dots on a graph with straight lines. If a player was at pitch position (400, 300) in frame 10 and (420, 340) in frame 15, we assume they moved in a straight line between those two frames and fill in:
+
+```
+frame 11 → (404, 308)
+frame 12 → (408, 316)
+frame 13 → (412, 324)
+frame 14 → (416, 332)
+```
+
+Each step is (target - start) / number of steps. This is what `np.interp` does — it takes your known x-coordinates (frame numbers) and known y-values (positions) and fills in a value for every frame between the first and last detection.
+
+Note: frames before the first detection and after the last detection are not filled in at all. If track 42 first appears in frame 10 and disappears in frame 80, we produce positions for frames 10–80 only.
+
+---
+
+### Step 2 — Savitzky-Golay smoothing
+
+Linear interpolation fills gaps, but it does not fix the jitter on detected frames. Savitzky-Golay (SG) filtering is a sliding-window polynomial fit. The plain English version: for each frame, look at the N frames around it, fit a smooth curve through them, and replace the current value with the point on that curve.
+
+The key parameter is the window size — how many surrounding frames to consider.
 
 | Track length | Window |
-|-------------|--------|
-| > 20 frames | `min(long_win, n_frames)` |
-| 10–20 frames | `min(mid_win, n_frames)` |
-| < 10 frames | `None` (no smoothing) |
+|---|---|
+| More than 20 frames | 15 frames |
+| 10 to 20 frames | 11 frames |
+| Fewer than 10 frames | no smoothing |
 
-The returned window is always odd (the SG filter requirement) — if the computed value is even, it is decremented by 1. Short tracks (< 10 frames) are not smoothed because a short trajectory has few data points and SG filtering can introduce edge artefacts.
+Why different windows? A large window smooths more aggressively. For short tracks (say, 8 frames) a window of 15 would be wider than the whole track — there are not enough data points to fit reliably, and SG filtering can introduce artefacts near the edges of short arrays. Very short tracks are left alone.
 
----
+The window must always be an odd number (a quirk of how polynomial fits work with symmetric windows). If the computed value is even, it is decremented by 1.
 
-### `_apply_max_velocity(xs, ys, max_vel) → None` (in-place)
-
-Clamps frame-to-frame displacement to at most `max_vel` pixels.
-
-**Algorithm:**
-```
-for i in 1..len(xs)-1:
-    dist = hypot(xs[i]-xs[i-1], ys[i]-ys[i-1])
-    if dist > max_vel:
-        scale = max_vel / dist
-        xs[i] = xs[i-1] + (xs[i]-xs[i-1]) * scale
-        ys[i] = ys[i-1] + (ys[i]-ys[i-1]) * scale
-```
-
-When a step exceeds `max_vel`, the position is moved along the **same direction** but capped at `max_vel`. All subsequent positions are then relative to this corrected point — meaning the shift is NOT propagated forward. This is intentional: a single detection outlier causes only a one-frame correction, not a sustained drift.
+Important: SG smoothing is applied to the full sequence — detected frames and interpolated frames together. An earlier version only smoothed the interpolated gaps and left detected frames as raw values. This caused a visible stutter: every time playback hit a detected frame, the position jumped because it had not been smoothed. Applying SG to everything makes the motion continuous.
 
 ---
 
-### `interpolate_trajectories(sparse_positions, start_frame, end_frame, ...) → List[PlayerPitchPosition]`
+### Step 3 — `_apply_max_velocity` — clamping runaway jumps
 
-Full smoothing pipeline per track.
+After smoothing, there can still be outlier jumps. For example, if the tracker assigned the same track ID to two different players (a known BotSort failure mode), the position can jump from one side of the pitch to the other in a single frame.
 
-**Input:** sparse `PlayerPitchPosition` objects with `source in ("homography", "homography_interp")`.
+The maximum realistic speed for a GAA player is roughly 10 m/s. At 10 px/m and 25 fps that is:
 
-**Steps per track:**
+```
+10 m/s × 10 px/m ÷ 25 fps = 4.0 px per frame
+```
 
-1. **Filter to range:** only positions within `[start_frame, end_frame]` are used.
+So `_DEFAULT_MAX_VEL_PX = 4.0`.
 
-2. **Skip single-detection tracks:** tracks with only 1 detection are returned as-is (nothing to interpolate between).
+The algorithm walks through the position sequence frame by frame. When a step exceeds 4 px, it does not discard the point — it moves it along the same direction but caps the distance:
 
-3. **Linear interpolation:**
-   ```python
-   frames_track = np.arange(track_start, track_end + 1)
-   xs = np.interp(frames_track, known_frames, known_xs)
-   ys = np.interp(frames_track, known_frames, known_ys)
-   ```
-   `np.interp` fills every frame between the first and last detection. No extrapolation — frames before the first detection or after the last are not generated.
+```
+For each frame i:
+    dist = distance from position[i-1] to position[i]
+    if dist > 4.0:
+        scale = 4.0 / dist
+        position[i] = position[i-1] + (position[i] - position[i-1]) * scale
+```
 
-4. **Canvas clip:** `xs = np.clip(xs, 0, OUT_W)`, `ys = np.clip(ys, 0, OUT_H)`.
+The phrase "moves in the same direction but capped" means: if a player jumped 20 px to the right, we move them 4 px to the right instead. We do not snap them back.
 
-5. **Savitzky-Golay smoothing** (if track is long enough):
-   ```python
-   xs = savgol_filter(xs, window_length=win, polyorder=2)
-   ys = savgol_filter(ys, window_length=win, polyorder=2)
-   xs = np.clip(xs, 0, OUT_W)
-   ys = np.clip(ys, 0, OUT_H)
-   ```
-   SG smoothing is applied to the **full interpolated sequence** including originally-detected frames. This is important: earlier versions only smoothed interpolated frames, leaving the detected frames as raw values. This caused jitter at every anchor because the transition from smoothed interpolated values to raw detected values produced discontinuities.
+Crucially, this correction is not carried forward. Position[i+1] is compared against the corrected position[i], so if the next frame is fine, only the one bad frame was adjusted. This prevents a chain reaction where fixing one frame pulls all subsequent positions toward it.
 
-6. **Max-velocity clamping** (if `max_vel_px > 0`):
-   Applies `_apply_max_velocity` then clips again.
+---
 
-7. **Source label preservation:**
-   Detected frames retain their original `source` label (`"homography"` or `"homography_interp"`). Filled frames get `source = "interpolated"`.
+### `interpolate_trajectories` — putting it all together
 
-**Output:** all positions sorted by `(frame_idx, track_id)`.
+The entry point for trajectory processing. It handles one track at a time and applies the three steps above.
+
+**Full sequence of steps:**
+
+1. Filter: keep only positions within the requested `[start_frame, end_frame]` window. Clips where the video was trimmed.
+
+2. Skip single-point tracks: a track with only one detected frame has nothing to interpolate between. Return it as-is.
+
+3. Linear interpolation: fill every frame between first and last detection.
+
+4. Canvas clip: after interpolation, clamp all positions to the canvas boundary (0 to 850 in x, 0 to 1400 in y). Extrapolation artefacts or projection errors can occasionally push a point outside the canvas.
+
+5. Savitzky-Golay smoothing (if the track is long enough): smooth the full sequence. Clip to canvas bounds again because SG can introduce slight overshoots at the edges.
+
+6. Velocity clamping: apply `_apply_max_velocity`, then clip once more.
+
+7. Label each output position: frames that were detected get their original source label (`"homography"` or `"homography_interp"`). Frames that were filled in get `source = "interpolated"`.
+
+Output is a flat list of positions sorted by `(frame_idx, track_id)`.

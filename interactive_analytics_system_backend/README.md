@@ -1,196 +1,133 @@
-# GAA Video Analysis API
+# GAA Video Analysis — Backend
 
-Production-ready FastAPI backend for GAA video analysis with player tracking and trajectory interpolation.
+FastAPI backend for the GAA video analysis pipeline. Accepts an uploaded MP4, runs
+YOLO+BotSort player tracking via a Modal serverless GPU, computes per-frame
+perspective-correcting homographies from user-supplied pitch annotations, maps every
+player detection to a fixed 2-D pitch canvas, and computes spatial KPIs.
 
-## Features
-
-- **Video Upload & Processing** - Upload MP4 videos and extract metadata
-- **Player Detection** - YOLOv8 + ByteTrack for player tracking (runs on Modal GPU)
-- **Pitch Calibration** - Homography-based coordinate mapping
-- **Trajectory Interpolation** - Linear interpolation between anchor frames
-- **RESTful API** - Clean JSON API with OpenAPI documentation
-
-## Architecture
-
-```
-┌─────────────────────┐      ┌─────────────────────┐
-│   Render Backend    │      │   Modal GPU         │
-│   (FastAPI)         │      │   (T4 GPU)          │
-│                     │      │                     │
-│  1. Upload video    │      │                     │
-│  2. Call GPU API ───────>  │  3. Run YOLO        │
-│                     │  <───── 4. Return detections│
-│  5. Compute homography     │                     │
-│  6. Map players     │      │                     │
-│  7. Return results  │      │                     │
-└─────────────────────┘      └─────────────────────┘
-```
+---
 
 ## Quick Start
 
-### 1. Deploy Modal GPU Service (Required)
+### 1. Deploy the Modal GPU service (required for tracking)
 
 ```bash
-# Install Modal CLI
 pip install modal
-
-# Authenticate
 modal token new
-
-# Deploy YOLO service
-cd interactive_analytics_system_backend
+modal volume put yolo-model-cache v8s_960_v9.pt /v8s_960_v9.pt
 modal deploy gpu_inference/modal_yolo.py
+# Copy the printed endpoint URL → GPU_ENDPOINT_URL env var
 ```
 
-Copy the endpoint URL printed after deployment.
-
-### 2. Local Development
+### 2. Run locally
 
 ```bash
-# Clone and navigate to backend
 cd interactive_analytics_system_backend
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Set environment variables
 export GPU_PROVIDER=modal
 export GPU_ENDPOINT_URL=https://your-modal-endpoint.modal.run
 
-# Run server
-uvicorn app:app --reload --port 8000
+uvicorn main:app --reload --port 8000
 ```
+
+Interactive docs: http://localhost:8000/docs
 
 ### 3. Deploy to Render
 
-1. Connect your GitHub repository to Render
-2. Create a new Web Service pointing to `interactive_analytics_system_backend/`
-3. Render will auto-detect `render.yaml` configuration
-4. Set these environment variables in Render dashboard:
-   - `ALLOWED_ORIGINS` - Your frontend URL
-   - `GPU_PROVIDER` - `modal`
-   - `GPU_ENDPOINT_URL` - Your Modal endpoint URL
+Connect your GitHub repo to Render; the `render.yaml` in this directory is
+pre-configured. Set `ALLOWED_ORIGINS`, `GPU_PROVIDER`, and `GPU_ENDPOINT_URL` in
+the Render dashboard.
+
+---
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GPU_PROVIDER` | GPU inference provider (`modal`, `runpod`, `local`) | `local` |
-| `GPU_ENDPOINT_URL` | URL of the GPU inference endpoint | - |
-| `GPU_API_KEY` | API key for GPU provider (RunPod only) | - |
-| `ALLOWED_ORIGINS` | CORS allowed origins | `*` |
-| `MAX_VIDEO_SIZE_MB` | Maximum video upload size | `500` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GPU_PROVIDER` | `modal` | GPU inference provider (`modal`) |
+| `GPU_ENDPOINT_URL` | — | URL of the deployed Modal endpoint |
+| `ALLOWED_ORIGINS` | `*` | CORS allow-list (comma-separated) |
+| `MAX_VIDEO_SIZE_MB` | `500` | Maximum upload size |
+| `DATA_DIR` | `data` | Root directory for all persisted files |
+
+---
 
 ## Project Structure
 
 ```
 interactive_analytics_system_backend/
-├── app.py                 # FastAPI application
-├── gpu_inference/         # GPU inference client
-│   ├── __init__.py        # GPUInferenceClient class
-│   ├── modal_yolo.py      # Modal GPU service (deploy this)
-│   └── README.md          # GPU setup instructions
-├── pipeline/              # Processing pipeline
-│   ├── detect.py          # YOLO tracking (delegates to GPU)
-│   ├── homography.py      # Homography computation
-│   ├── map_players.py     # Player position mapping
-│   ├── trajectories.py    # Trajectory interpolation
-│   ├── schemas.py         # Pydantic models
-│   └── video.py           # Video utilities
-├── requirements.txt       # Production dependencies
-└── render.yaml            # Render deployment config
+├── app.py                   # Creates FastAPI app, registers all routers
+├── main.py                  # Uvicorn entry point
+├── store.py                 # VideoStore singleton — in-memory state
+├── routes/                  # HTTP endpoint handlers (one file per domain)
+│   ├── deps.py              # Shared dependency: get_video_or_404
+│   ├── videos.py            # Upload, frame, warped-frame endpoints
+│   ├── detection.py         # POST /track, GET /detections endpoints
+│   ├── homography.py        # POST /homographies/v3, anchor-quality endpoints
+│   ├── mapping.py           # map_players, interpolate, players endpoints
+│   ├── classification.py    # classify-teams + PATCH override endpoints
+│   └── kpi.py               # compute-kpis endpoint
+├── pipeline/                # Pure processing logic — no HTTP concerns
+│   ├── config.py            # OUT_W, OUT_H, PITCH_SCALE constants
+│   ├── gaa_pitch_config.py  # GAA pitch geometry: vertices, lines, sidelines
+│   ├── schemas.py           # Pydantic models for all data types
+│   ├── persistence.py       # All disk I/O (save/load JSON, homographies, etc.)
+│   ├── video.py             # OpenCV: metadata extraction, frame extraction
+│   ├── rendering.py         # warp_frame (cv2.warpPerspective wrapper)
+│   ├── homography.py        # v3 DLT anchor H computation
+│   ├── line_constraints.py  # DLT line constraint helpers
+│   ├── constrained_homography.py  # LK optical flow per-frame propagation
+│   ├── map_players.py       # Filter detections, map bbox → pitch coords
+│   ├── trajectories.py      # Interpolation + SG smoothing + velocity clamp
+│   ├── team_classifier.py   # Jersey-colour HSV team classification
+│   └── kpi.py               # Spatial KPI computation
+├── gpu_inference/           # Remote GPU client
+│   ├── __init__.py          # GPUInferenceClient (httpx wrapper for Modal)
+│   ├── modal_yolo.py        # Modal serverless GPU service (deploy this)
+│   └── README.md            # GPU setup instructions
+├── tests/                   # pytest suite
+├── models/                  # YOLO model weights (v8s_960_v9.pt)
+├── requirements.txt
+└── render.yaml              # Render deployment config
 ```
+
+---
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| POST | `/videos` | Upload video |
-| POST | `/videos/{id}/track` | Run player tracking |
-| POST | `/videos/{id}/homographies` | Compute homographies |
-| POST | `/videos/{id}/map_players` | Map players to pitch |
-| POST | `/videos/{id}/interpolate` | Interpolate trajectories |
-| GET | `/videos/{id}/players` | Get player positions |
-| POST | `/process-video` | Full pipeline (single request) |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness check |
+| POST | `/videos` | Upload MP4, extract metadata |
+| GET | `/videos/{id}/frame/{idx}` | Raw video frame as JPEG |
+| GET | `/videos/{id}/frames/{idx}/warped` | Warped pitch view (bird's-eye) |
+| GET | `/videos/{id}/frames/{idx}/detections_overlay` | Raw frame + BotSort boxes |
+| GET | `/videos/{id}/detections` | All raw YOLO+BotSort detections |
+| POST | `/videos/{id}/track` | Run YOLO+BotSort (dispatches to Modal) |
+| POST | `/videos/{id}/homographies/v3` | Compute anchor Hs + propagate per-frame |
+| GET | `/line-constraints/available-lines` | Line IDs usable for annotations |
+| GET | `/videos/{id}/homographies/anchor-quality` | Per-keypoint reprojection quality |
+| POST | `/videos/{id}/map_players` | Map detections → pitch canvas coords |
+| POST | `/videos/{id}/interpolate` | Interpolate + smooth trajectories |
+| GET | `/videos/{id}/players` | All player positions (sparse + interpolated) |
+| POST | `/videos/{id}/classify-teams` | Classify tracks by jersey colour |
+| GET | `/videos/{id}/classify-teams` | Return stored team classifications |
+| PATCH | `/videos/{id}/classify-teams` | Override a single track's team |
+| POST | `/videos/{id}/compute-kpis` | Compute spatial KPIs; `?end_frame=N` trims clip |
 
-### Interactive Documentation
+---
 
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## Configuration
-
-Environment variables (with defaults):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `8000` | Server port |
-| `ALLOWED_ORIGINS` | `*` | CORS origins (comma-separated) |
-| `MAX_VIDEO_SIZE_MB` | `500` | Max upload size |
-| `DATA_DIR` | `data` | Data storage directory |
-| `YOLO_MODEL_PATH` | `models/best.pt` | Path to YOLO model |
-
-## Project Structure
-
-```
-interactive_analytics_system_backend/
-├── app.py                 # FastAPI application
-├── main.py                # Uvicorn entry point
-├── pipeline/              # Core processing modules
-│   ├── __init__.py
-│   ├── config.py          # Configuration constants
-│   ├── detect.py          # YOLO + ByteTrack detection
-│   ├── gaa_pitch_config.py # GAA pitch vertices
-│   ├── homography.py      # Homography computation
-│   ├── map_players.py     # Pixel to pitch mapping
-│   ├── schemas.py         # Pydantic models
-│   ├── trajectories.py    # Trajectory interpolation
-│   └── video.py           # Video utilities
-├── models/                # YOLO model weights
-│   └── best.pt
-├── tests/                 # Test suite
-├── requirements.txt       # Production dependencies
-├── requirements-dev.txt   # Development dependencies
-├── Dockerfile             # Container configuration
-├── render.yaml            # Render deployment config
-└── .env.example           # Environment template
-```
-
-## Testing
+## Running Tests
 
 ```bash
-# Run all tests
+cd interactive_analytics_system_backend
 pytest -v
-
-# Run with coverage
-pytest --cov=pipeline --cov-report=html
 ```
 
-## Data Contract
-
-The API uses these core data structures:
-
-1. **Detection** - YOLO tracking output
-   ```json
-   {"frame_idx": 0, "track_id": 1, "x1": 100, "y1": 100, "x2": 150, "y2": 200, "confidence": 0.9}
-   ```
-
-2. **PitchAnnotation** - Keypoint annotations
-   ```json
-   {"frame_idx": 0, "points": [{"pitch_id": "corner_tl", "x_img": 100, "y_img": 50}]}
-   ```
-
-3. **PlayerPitchPosition** - Mapped positions
-   ```json
-   {"frame_idx": 0, "track_id": 1, "x_pitch": 425.0, "y_pitch": 725.0, "source": "homography"}
-   ```
-
-## License
-
-MIT
-
+70 tests pass. Known pre-existing failures (unrelated to current code):
+- `test_homography.py` — references a deleted function
+- `test_line_constraints.py` — `test_validate_tilted_line_fails` (logic under review)
+- `test_trajectories.py` — one edge case
+- `test_gpu_inference.py` — requires Modal credentials

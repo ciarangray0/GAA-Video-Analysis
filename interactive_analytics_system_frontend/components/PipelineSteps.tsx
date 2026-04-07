@@ -206,7 +206,7 @@ export default function PipelineSteps({
         </button>
         {stepBResult && (
           <div className="step-result">
-            <p>✅ Homographies computed for {stepBResult.frames.length} anchor frames</p>
+            <p>Homographies computed for {stepBResult.frames.length} anchor frames</p>
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
             <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
 

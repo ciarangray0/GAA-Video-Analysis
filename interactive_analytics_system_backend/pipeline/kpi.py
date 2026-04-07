@@ -25,6 +25,13 @@ import numpy as np
 
 from pipeline.gaa_pitch_config import GAA_PITCH_LENGTH, PITCH_SCALE
 
+# scipy is an optional dependency: convex-hull area is skipped when unavailable.
+try:
+    from scipy.spatial import ConvexHull  # type: ignore
+    _has_scipy = True
+except ImportError:
+    _has_scipy = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -39,10 +46,12 @@ THIRD_2_END_M = 2.0 * GAA_PITCH_LENGTH / 3.0  # 93.333 m — end of middle third
 # ---------------------------------------------------------------------------
 
 def _get(p, key: str):
+    """Get a field from a dict or object attribute."""
     return p[key] if isinstance(p, dict) else getattr(p, key)
 
 
 def _team_label(cls) -> str:
+    """Return the team string from a classification dict/object, or 'unclassified'."""
     if cls is None:
         return "unclassified"
     return cls["team"] if isinstance(cls, dict) else getattr(cls, "team", "unclassified")
@@ -97,12 +106,6 @@ def compute_team_spatial(
     Also includes a top-level ``centroid_separation_m`` key when both
     'ellistown' and 'opposition' are present.
     """
-    try:
-        from scipy.spatial import ConvexHull  # type: ignore
-        _has_scipy = True
-    except ImportError:
-        _has_scipy = False
-
     frame_pos = [p for p in positions if int(_get(p, "frame_idx")) == frame_idx]
 
     teams: Dict[str, List[tuple]] = {}

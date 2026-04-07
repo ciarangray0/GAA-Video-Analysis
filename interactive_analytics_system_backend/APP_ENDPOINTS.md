@@ -1,6 +1,17 @@
-# App Endpoints (`app.py`)
+# App Endpoints
 
-FastAPI application entry point. Declares all HTTP endpoints, helper functions, middleware, and startup/shutdown logic.
+FastAPI application entry point (`app.py`) creates the app, registers CORS middleware, and mounts all endpoint routers from `routes/`. Endpoint logic is split across six router files:
+
+| Router file | Domain |
+|-------------|--------|
+| `routes/videos.py` | Upload, frame extraction, warped-frame views |
+| `routes/detection.py` | Tracking + raw detections |
+| `routes/homography.py` | v3 homography compute + anchor quality |
+| `routes/mapping.py` | Player mapping, interpolation, player positions |
+| `routes/classification.py` | Team classification + override |
+| `routes/kpi.py` | KPI computation |
+
+All disk I/O uses helpers from `pipeline/persistence.py`. Shared lookup (`get_video_or_404`) lives in `routes/deps.py`.
 
 ---
 
@@ -26,42 +37,30 @@ Reads allowed origins from the `ALLOWED_ORIGINS` environment variable (comma-sep
 
 ---
 
-## Helper Functions
+## Key Helpers
 
-### `_restore_videos_from_disk() → None`
-Scans `VIDEOS_DIR` for `*_meta.json` files and repopulates `store.videos`. Called once at startup. Skips entries whose video file no longer exists. Logs the number of restored videos.
+### `routes/deps.py — get_video_or_404(video_id) → dict`
+Looks up `video_id` in `store.videos`. Raises `HTTPException(404)` if not found. Returns the metadata dict. Used by every router that needs an existing video.
 
-### `_get_video_or_404(video_id) → dict`
-Looks up `video_id` in `store.videos`. Raises `HTTPException(404)` if not found. Returns the metadata dict on success. Used by every endpoint that needs an existing video.
+### `pipeline/persistence.py` — disk I/O
+All save/load helpers have been consolidated here:
+- `save_video_meta / load_video_meta` — metadata JSON
+- `save_detections / load_detections` — YOLO detection list
+- `save_homography_dict / load_homography_dict` — H matrix dicts (numpy ↔ JSON)
+- `save_annotations / load_annotations` — user keypoint + line annotations
+- `save_team_classifications / load_team_classifications` — jersey-colour results
+- `restore_videos_from_disk()` — called at startup to repopulate `store.videos`
 
-### `_save_json(path, data) → None` / `_load_json(path) → Optional[dict]`
-Generic JSON persistence helpers. `_load_json` returns `None` if the file does not exist.
-
-### `_serialize_H(h_dict) → dict` / `_deserialize_H(data) → dict`
-Convert `Dict[int, np.ndarray]` ↔ `Dict[str, list]` for JSON serialisation. `numpy` arrays cannot be serialised directly; `tolist()` produces nested Python lists. On load, `np.array(v)` reconstructs the arrays.
-
-### `validate_video_upload(file, content) → None`
+### `routes/videos.py — validate_video_upload(file, content) → None`
 Raises `HTTPException` if:
 - File size exceeds `MAX_VIDEO_SIZE` (413 Too Large)
 - Filename does not end in `.mp4` (400)
 - Content-Type is not `video/mp4` or `application/octet-stream` (400)
 
-### `save_video_meta / load_detections / save_detections`
-Thin wrappers around `_save_json` / `_load_json` for specific file paths.
+### `_resolve_homography(video_id, frame_idx)` (in `routes/videos.py`)
+Returns the per-frame v3 homography for `frame_idx`. Tries memory cache first, then disk. If the exact frame is missing, falls back to the nearest anchor frame by absolute index distance. Returns `None` if no homographies exist at all.
 
-### `_save_homography_dict(video_id, key, h_dict) → None`
-Saves `{video_id}_{key}.json` to `ANNOTATIONS_DIR`. The `key` is either `"v3_anchor_homographies"` or `"v3_homographies"`.
-
-### `_load_homography_dict(video_id, key) → Optional[Dict[int, np.ndarray]]`
-Loads the corresponding JSON file and deserialises to a numpy dict. Returns `None` if the file does not exist.
-
-### `save_annotations / load_annotations`
-Persists/loads the user's keypoint and line annotations per frame to `{video_id}_annotations.json`. `_serialise_ann_value` handles both Pydantic model instances and plain dicts.
-
-### `_resolve_homography(video_id, frame_idx) → Optional[np.ndarray]`
-Returns the per-frame v3 homography for `frame_idx`. Tries memory cache first, then disk. If the exact frame is not present, returns the H for the nearest frame by absolute index distance (nearest-anchor fallback). Returns `None` if no homographies exist at all.
-
-### `_draw_reference_lines(warped) → None`
+### `_draw_reference_lines(warped)` (in `routes/videos.py`)
 Draws semi-transparent pitch reference lines (opacity `_LINE_ALPHA = 0.45`) onto a warped canvas image **in place** using `cv2.addWeighted`.
 
 Lines drawn:
@@ -69,8 +68,6 @@ Lines drawn:
 - 2 semicircles at the 20m lines (radius 13m = 130 px)
 - 4 vertical lines for the 13m box (x=33m, x=52m from each endline to the 13m line)
 - 6 lines for the small (goalie) box (x=35.5m–49.5m, depth=4.5m from each endline)
-
-Each line's pixel position is computed by `y_px = int(y_m / GAA_PITCH_LENGTH * OUT_H)`.
 
 ---
 
@@ -224,7 +221,7 @@ Classify player tracks as `'ellistown'` or `'opposition'` using jersey colour an
 
 1. Loads detections from cache or disk. Raises 400 if no detections exist (run tracking first).
 2. Filters detections to player tracks only via `filter_detections_for_mapping`.
-3. Calls `classify_tracks(video_path, player_detections)` in a thread (`asyncio.to_thread`). This samples up to 30 frames per track, extracts the jersey HSV colour from the top 50% of each bounding box, and classifies based on Ellistown yellow fraction (see `TEAM_CLASSIFIER.md`).
+3. Calls `classify_tracks(video_path, player_detections)` in a thread (`asyncio.to_thread`). This performs a single sequential video pass, grouping sampled detections by frame index, decoding each unique frame once (not 30 separate `cap.read()` calls), extracting jersey HSV colour from the top 50% of each bounding box, and classifying based on Ellistown yellow fraction (see `TEAM_CLASSIFIER.md`).
 4. Stores result in `store.team_classifications_cache` and persists to `{video_id}_team_classifications.json`.
 5. Computes a summary:
    - `num_ellistown`, `num_opposition` — track counts per team.

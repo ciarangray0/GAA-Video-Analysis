@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+# load_dotenv must be called before any module that reads env vars (e.g. config.py).
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
@@ -12,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pipeline.persistence import ensure_dirs, restore_videos_from_disk
 from store import store
-
 from routes.videos import router as videos_router
 from routes.detection import router as detection_router
 from routes.homography import router as homography_router
@@ -28,6 +28,7 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Create data directories and restore persisted videos on startup."""
     ensure_dirs()
     videos = restore_videos_from_disk()
     store.videos.update(videos)
@@ -56,4 +57,5 @@ app.include_router(kpi_router)
 
 @app.get("/health")
 async def health_check():
+    """Return service health status."""
     return {"status": "ok"}

@@ -6,6 +6,7 @@ export const ZONE_RANGES = {
   attacking: '93–140m',
 } as const
 
+/** Return a CSS colour string for a team name ('ellistown' | 'opposition' | other). */
 export function teamColor(team: string): string {
   if (team === 'ellistown') return '#FFD700'
   if (team === 'opposition') return '#4488FF'
@@ -22,6 +23,10 @@ export interface ZoneAnalysis {
   detectedZone: 'defensive' | 'middle' | 'attacking'
 }
 
+/**
+ * Aggregate zone balance data from a KPI summary into per-team totals,
+ * frame count, combined zone activity, and the dominant detected zone.
+ */
 export function computeZoneAnalysis(kpiSummary: KpiSummary): ZoneAnalysis {
   const totals: Record<string, Record<string, number>> = {}
   let frameCount = 0

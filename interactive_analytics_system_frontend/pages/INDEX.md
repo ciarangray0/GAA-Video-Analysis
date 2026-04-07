@@ -1,40 +1,77 @@
-# `pages/index.tsx`
+# `pages/index.tsx` — The Root Page
 
-Root page of the application. Owns all cross-step state and wires the five major UI components together.
-
----
-
-## Key State Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `videoFile` | `null` | Raw `File` object — passed to `ResultsViewer` to create a blob URL for the HTML `<video>` element. Not uploaded via this state; `VideoUploader` handles the HTTP POST. |
-| `videoMetadata` | `null` | Set by `VideoUploader.onUploadSuccess`. Contains `video_id` used in all subsequent API calls. |
-| `anchorInterval` | `1` | Seconds. Controls how many frames `generateAnchorFrames` creates. |
-| `anchorFrames` | `[]` | Array of `AnchorFrame` — the core annotation data structure. Each element has `frame_idx`, `isSkipped`, `points`, `lines`. |
-| `currentAnchorIdx` | `0` | Index into `anchorFrames` — which anchor the annotator is currently showing. |
-| `stepAResult` | `null` | Set after tracking completes. Holds `{frames_processed, tracks, num_detections}`. |
-| `stepBResult` | `null` | Set after homography computation. Holds `{frames, per_frame_count, info}`. |
-| `stepCResult` | `null` | Set after player mapping. Holds `{positions, total}`. |
-| `stepDResult` | `null` | Set after interpolation. Holds `{frames_generated, method}`. |
-| `staleSteps` | `new Set()` | Step IDs (`"A"`, `"B"`, `"C"`, `"D"`) that are out of date with current annotations. Displayed as "STALE" badges in PipelineSteps. |
-| `runningSteps` | `new Set()` | Steps currently executing. Used to disable buttons. |
-| `stepDoneRef` | `{B:false, C:false, D:false}` | `useRef` tracking whether downstream steps have results. Used to avoid false stale-marking on first annotation. |
-| `playerPositions` | `[]` | Dense list of all `PlayerPosition` objects after interpolation. Passed to ResultsViewer. |
-| `currentFrame` | `0` | Currently selected frame in ResultsViewer. Initialised to the first frame with player positions after step D completes. |
-| `processedStartFrame` | `0` | Start frame passed to the interpolation step. |
-| `processedEndFrame` | `0` | End frame passed to the interpolation step. |
-| `homographyFrameIndices` | `[]` | Anchor frame indices returned from step B. Displayed in ResultsViewer to show which frames are anchor frames. |
-| `processedFps` | `25` | FPS from `videoMetadata.fps`. Used for video/pitch sync. |
-| `status`, `error` | `''` | User-facing status/error messages shown in the status bar. |
-| `debugLog` | `useRef([])` | Accumulates API call log strings. `useRef` prevents rerenders on every log append. |
-| `debugLogEntries` | `[]` | Synced copy of `debugLog.current` used as prop for `DebugLog`. |
+This is the top-level file of the application. In Next.js, every file in the `pages/` folder becomes a URL route. `pages/index.tsx` is the root route (`/`) — the page the user sees when they open the app. It acts as the "brain" that connects all the other components together and owns all the shared data.
 
 ---
 
-## `generateAnchorFrames()`
+## What does "root page" mean?
 
-Triggered by the "Generate Anchor Frames" button (step 2).
+Think of the application as a tree:
+
+```
+pages/index.tsx         ← you are here (owns all the data)
+├── VideoUploader       ← handles file selection + upload
+├── AnchorFrameAnnotator ← annotation interface
+├── PipelineSteps       ← run A/B/C/D buttons
+└── ResultsViewer       ← video + pitch playback
+```
+
+Data flows DOWN from the root page to each component as props. When a component wants to change something, it calls a callback function that the root page gave it — the root page then updates its own state, which flows back down. This is called "one-way data flow" and it means you can always look at `index.tsx` to understand the full state of the application.
+
+---
+
+## useState — tracking values that change
+
+```typescript
+const [videoFile, setVideoFile] = useState<File | null>(null)
+const [anchorFrames, setAnchorFrames] = useState<AnchorFrame[]>([])
+```
+
+`useState` creates a variable (`videoFile`) and a setter function (`setVideoFile`). When you call the setter, React re-renders the component with the new value. You never assign directly (not `videoFile = someFile`) — only the setter triggers a re-render.
+
+Here is every piece of state owned by the root page:
+
+| Variable | Starts as | What it is |
+|----------|-----------|-----------|
+| `videoFile` | `null` | The raw video file the user selected. Passed to `ResultsViewer` so it can play the video locally. |
+| `videoMetadata` | `null` | Info returned by the server after upload: `video_id`, fps, frame count. `video_id` is used in every subsequent API call. |
+| `anchorInterval` | `1` | How many seconds apart to place anchor frames (user can change this before generating). |
+| `anchorFrames` | `[]` | The complete list of annotation frames. Each has `frame_idx`, `isSkipped`, `points` (keypoint pairs), `lines` (line annotations). This is the core data the pipeline runs on. |
+| `currentAnchorIdx` | `0` | Which annotation frame the annotator is currently showing. |
+| `stepAResult` | `null` | Results from the tracking step, or `null` if not run yet. |
+| `stepBResult` | `null` | Results from the homography step. |
+| `stepCResult` | `null` | Results from the player mapping step. |
+| `stepDResult` | `null` | Results from the interpolation step. |
+| `staleSteps` | `new Set()` | A set of step letters (`"A"`, `"B"`, `"C"`, `"D"`) that are out of date. Shown as "STALE" badges in the pipeline panel. |
+| `runningSteps` | `new Set()` | Steps currently executing. Used to disable their buttons. |
+| `playerPositions` | `[]` | The full list of player positions after step D. Passed to `ResultsViewer`. |
+| `currentFrame` | `0` | Which video frame is currently displayed in `ResultsViewer`. |
+| `processedStartFrame`, `processedEndFrame` | `0` | The range of frames the interpolation step covered. |
+| `homographyFrameIndices` | `[]` | Which frame indices are anchor frames (returned from step B). |
+| `processedFps` | `25` | The fps value used during processing. |
+| `status`, `error` | `''` | User-facing messages shown in the status bar. |
+| `debugLogEntries` | `[]` | A copy of the API call log, used to display the debug log panel. |
+
+---
+
+## useRef — values that don't cause re-renders
+
+```typescript
+const debugLog = useRef<string[]>([])
+const stepDoneRef = useRef({ B: false, C: false, D: false })
+```
+
+`useRef` is like a box you can store a value in, but changing the value does NOT cause a re-render. Two important uses here:
+
+**`debugLog`:** Every API call gets logged (e.g. `"→ POST /track"`, `"← 200 (1234ms)"`). We use a ref for the raw array and a separate state (`debugLogEntries`) for the rendered copy. Why? If we stored the log only in state, every `console.log` equivalent would trigger a full re-render. The ref holds the accumulating array; state only gets updated when we want the UI to reflect it.
+
+**`stepDoneRef`:** Tracks whether each downstream step has ever produced results. Used to avoid a subtle bug: when the user first adds annotations, we should NOT immediately mark steps stale (they have never run — there is nothing to go stale). `stepDoneRef` is checked in `handleAnchorFramesChange` before marking anything stale. Because it is a ref, updating it does not cause a re-render, avoiding an infinite loop.
+
+---
+
+## `generateAnchorFrames()` — creating the annotation list
+
+This function runs when the user clicks "Generate Anchor Frames". It creates evenly-spaced frames for the user to annotate:
 
 ```typescript
 for (let seconds = 0; seconds <= duration_seconds; seconds += anchorInterval) {
@@ -43,36 +80,48 @@ for (let seconds = 0; seconds <= duration_seconds; seconds += anchorInterval) {
 }
 ```
 
-After generating, checks `localStorage` for `"gaa_annotations_{videoFile.name}"`. If saved data exists, shows a confirm dialog. On confirmation, merges: for each generated frame, if a saved frame with the same `frame_idx` exists, replaces `isSkipped`, `points`, `lines` from the saved version.
+For a 30-second video at 25fps with a 1-second interval, this creates frames at indices 0, 25, 50, 75, ... 750. Each starts with empty `points` and `lines` — the user fills these in via `AnchorFrameAnnotator`.
+
+**localStorage restore:** After generating frames, the function checks `localStorage` for previously saved annotations under the key `"gaa_annotations_{videoFilename}"`. If found, it shows a confirm dialog. On confirmation, it merges the saved data: for each generated frame, if a saved frame with the same `frame_idx` exists, it restores `isSkipped`, `points`, and `lines` from the save. This means annotations survive page refreshes.
 
 ---
 
-## `handleAnchorFramesChange(frames)`
+## `handleAnchorFramesChange(frames)` — reacting to annotation changes
 
-Called by `AnchorFrameAnnotator` whenever annotations are modified.
+`AnchorFrameAnnotator` calls this function whenever the user adds, removes, or modifies an annotation. The root page:
 
-1. Updates `anchorFrames` state.
-2. Reads `stepDoneRef` to see which downstream steps have results.
-3. Marks those steps stale (avoids marking stale before any step has run — `stepDoneRef` uses `useRef` so it doesn't cause a render cycle itself).
+1. Updates `anchorFrames` state with the new array.
+2. Checks `stepDoneRef` — if steps B, C, or D have ever run, marks them stale (new annotations → old homographies are outdated).
+
+The `stepDoneRef` check prevents false stale-marking on first use: when the page loads and you add your very first annotation, steps B/C/D have never run, so there is nothing to go stale.
 
 ---
 
-## `markStale(steps)` / `clearStale(steps)`
+## `markStale(steps)` and `clearStale(steps)` — updating a Set safely
 
 ```typescript
 const markStale = (steps: string[]) => {
-  setStaleSteps(prev => { const next = new Set(prev); steps.forEach(s => next.add(s)); return next })
-}
-const clearStale = (steps: string[]) => {
-  setStaleSteps(prev => { const next = new Set(prev); steps.forEach(s => next.delete(s)); return next })
+  setStaleSteps(prev => {
+    const next = new Set(prev)
+    steps.forEach(s => next.add(s))
+    return next
+  })
 }
 ```
 
-Both use the functional updater form to avoid stale closure bugs. PipelineSteps calls these via `onStepsMarkedStale` and `onStepsClearedStale` props.
+`staleSteps` is a `Set` (like an array but with no duplicates and fast "does it contain X?" checks). React state must be replaced rather than mutated — you cannot do `staleSteps.add("B")` directly because React would not notice.
+
+The **functional updater form** (`prev => ...`) is used here. Instead of reading `staleSteps` directly from the component's closure (which might be stale if multiple state updates happen in quick succession), we receive the LATEST version as `prev`. This prevents a subtle bug where two rapid updates could overwrite each other.
+
+Step by step:
+1. `prev` = the current set.
+2. `const next = new Set(prev)` = make a copy (we cannot mutate `prev`).
+3. Add or remove from `next`.
+4. Return `next` — React sees a new Set and re-renders.
 
 ---
 
-## `logApiCall(entry)`
+## `logApiCall(entry)` — adding to the debug log
 
 ```typescript
 const logApiCall = (entry: string) => {
@@ -81,64 +130,73 @@ const logApiCall = (entry: string) => {
 }
 ```
 
-Spreads the array on every update to ensure React sees a new reference for the state update.
+`debugLog.current` is the ref that holds all log entries. We spread it into a new array (`[...debugLog.current, entry]`) rather than pushing to it. Why? Because `.push()` mutates the existing array in place. Using spread creates a brand-new array, which ensures React sees a new reference when we call `setDebugLogEntries`. React compares by reference — if it is the same array object, React might skip the re-render.
 
 ---
 
-## Step D Completion Callback
+## Step D completion — setting the initial frame
 
 ```typescript
 onStepDComplete={(result, positions, start, end, fps) => {
-  setStepDResult(result)
   setPlayerPositions(positions)
-  setProcessedStartFrame(start)
-  setProcessedEndFrame(end)
-  setProcessedFps(fps)
-  const firstFrame = positions.length > 0 ? Math.min(...positions.map(p => p.frame_idx)) : start
+  // ... other state updates ...
+  const firstFrame = positions.length > 0
+    ? Math.min(...positions.map(p => p.frame_idx))
+    : start
   setCurrentFrame(firstFrame)
 }}
 ```
 
-Sets `currentFrame` to the first frame that has player positions, so ResultsViewer starts at a frame with something to show rather than frame 0 which may be outside the processed range.
+After the pipeline finishes, `ResultsViewer` needs to start at a useful frame. Frame 0 might be outside the processed range (the pipeline might only have positions starting at frame 50). So instead of starting at 0, we find the lowest `frame_idx` that actually has player data using `Math.min(...positions.map(p => p.frame_idx))`. This ensures the pitch canvas shows dots immediately rather than appearing empty.
+
+`Math.min(...array)` is JavaScript's way of finding the minimum value in an array. The `...` (spread operator) unpacks the array into individual arguments.
 
 ---
 
-## `hasResults` and the Full-Bleed Layout
+## `hasResults` and the full-screen layout
 
 ```typescript
 const hasResults = playerPositions.length > 0 && videoMetadata !== null && videoFile !== null
 ```
 
-When `hasResults` is true the page switches from the normal scrolling pipeline layout to a **full-viewport two-column layout**:
+`hasResults` is true once the full pipeline has run and there are player positions to display. When this is true, the page completely changes its layout from a scrolling pipeline view to a full-screen two-column view:
 
 ```
 ┌─────────────────────┬──────────────────────────────────┐
-│  .pipeline-panel    │  .results-panel                  │
-│  (380 px, fixed)    │  (flex: 1, scrollable)           │
-│  pipeline steps     │  ResultsViewer                   │
-│  + debug log        │                                  │
+│  pipeline panel     │  results panel                   │
+│  (380px, fixed)     │  (fills remaining space)         │
+│  steps + debug log  │  ResultsViewer                   │
 └─────────────────────┴──────────────────────────────────┘
 ```
 
-The outer div uses `position: fixed; width: 100%; height: 100%` so it sits on top of the normal page flow and fills the entire viewport. `document.body.style.overflow = 'hidden'` is set while `hasResults` is true to prevent the background from scrolling.
+The outer `div` uses `position: fixed; width: 100%; height: 100%` to sit on top of the normal page flow and fill the entire viewport. `document.body.style.overflow = 'hidden'` prevents the background from scrolling while this layout is active.
 
-### JSX variable extraction
+### JSX variable extraction — avoiding copy-paste
 
-To avoid duplicating the pipeline steps and debug log markup across both layout branches, they are extracted as JSX variables inside the component body:
+Both layout branches (with results and without) need the pipeline steps panel and the debug log. Rather than duplicating that JSX in two places (and risking them getting out of sync), they are stored as variables:
 
 ```typescript
-const pipelineSteps = ( <> {/* steps 1–4 */} </> )
-const debugLogEl = ( <DebugLog ... /> )
+const pipelineSteps = (
+  <>
+    {/* All 4 step panels */}
+  </>
+)
+const debugLogEl = (<DebugLog entries={debugLogEntries} />)
 ```
 
-Both layout branches (`hasResults` and not) then reference these variables directly. This keeps the conditional rendering logic clean while ensuring only one copy of each section exists.
+Both layout branches then reference `{pipelineSteps}` and `{debugLogEl}`. This is a common pattern for keeping conditional rendering clean.
 
 ---
 
-## Conditional Rendering
+## Conditional rendering — what shows when
 
-- Step 2 (configure) is shown only when video is uploaded and no anchor frames exist yet.
-- Step 3 (annotate) + step 4 (pipeline) are shown when `anchorFrames.length > 0`.
-- When `hasResults` is true: full-bleed two-column layout (pipeline panel + results panel).
-- When `hasResults` is false: standard scrolling `.container` layout with `.main-content` and `.activity-sidebar`.
-- Status bar is shown when `status` or `error` is non-empty (pipeline layout only).
+React renders different UI based on the current state. Here is the progression:
+
+1. **Nothing uploaded yet:** Show `VideoUploader` only.
+2. **Video uploaded, no anchor frames:** Show the "Configure anchor interval" section.
+3. **Anchor frames generated:** Show `AnchorFrameAnnotator` + `PipelineSteps`.
+4. **Pipeline complete (`hasResults`):** Switch to full-screen two-column layout with `ResultsViewer` on the right.
+
+Each stage shows only what is relevant, guiding the user through the workflow in order.
+
+The status bar (showing `status` or `error` messages) is only shown in the pipeline layout (stages 1–3) — in the full-screen results layout, the pipeline panel handles its own feedback.

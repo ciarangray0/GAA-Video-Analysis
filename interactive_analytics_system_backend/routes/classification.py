@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pipeline.schemas import TeamOverrideRequest, VALID_TEAMS
 from pipeline.map_players import filter_detections_for_mapping
 from pipeline.persistence import load_detections, load_team_classifications, save_team_classifications
+from pipeline.team_classifier import override_classification
 from store import store
 from routes.deps import get_video_or_404
 
@@ -93,8 +94,6 @@ async def get_team_classifications(video_id: str):
 @router.patch("/videos/{video_id}/classify-teams")
 async def override_team_classification(video_id: str, body: TeamOverrideRequest):
     """Override a single track's team assignment."""
-    from pipeline.team_classifier import override_classification
-
     get_video_or_404(video_id)
 
     if body.team not in VALID_TEAMS:

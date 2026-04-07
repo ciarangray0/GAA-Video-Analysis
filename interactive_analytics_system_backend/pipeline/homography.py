@@ -13,11 +13,12 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 from pipeline.config import OUT_H, OUT_W
 from pipeline.gaa_pitch_config import GAA_PITCH_VERTICES, GAA_PITCH_WIDTH, GAA_PITCH_LENGTH
+from pipeline.line_constraints import GAA_PITCH_LINES, GAA_PITCH_SIDELINES, sample_points_on_line
 from pipeline.schemas import LineAnnotation, PitchPoint
+
+logger = logging.getLogger(__name__)
 
 _REPROJECTION_OUTLIER_PX = 30.0   # threshold above which a keypoint is labelled "outlier"
 _REPROJECTION_HIGH_PX    = 15.0   # threshold above which a keypoint is labelled "high" error
@@ -83,11 +84,6 @@ def _hartley_normalize(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     pts_h = np.column_stack([pts, np.ones(len(pts))])
     pts_n = (T @ pts_h.T).T[:, :2]
     return pts_n.astype(np.float64), T
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def resolve_pitch_coordinates(pitch_id: str) -> Tuple[float, float]:
     """Return (x_meters, y_meters) for a pitch_id.
@@ -190,7 +186,7 @@ def compute_homographies_with_lines_v3(
     """Compute anchor homographies: keypoints define H, lines reinforce it.
 
     Algorithm:
-      1. H₀ = findHomography(keypoints, RANSAC) — the primary robust solution.
+      1. H₀ = findHomography(keypoints, RANSAC) — the fallback solution.
       2. Build a weighted DLT system with Hartley-normalised coordinates:
            • Each keypoint contributes 2 rows (full X+Y) at weight keypoint_weight.
            • Each horizontal line sample contributes 1 row (Y-only) at weight 1.
@@ -206,12 +202,6 @@ def compute_homographies_with_lines_v3(
     (~1000s) × canvas coords (~1000s) reach ~10⁶ in the DLT matrix, making SVD
     numerically unstable and producing a catastrophically rotated output.
     """
-    from pipeline.line_constraints import (
-        GAA_PITCH_LINES,
-        GAA_PITCH_SIDELINES,
-        sample_points_on_line,
-    )
-
     homographies: Dict[int, np.ndarray] = {}
     computation_info: Dict[int, dict] = {}
 

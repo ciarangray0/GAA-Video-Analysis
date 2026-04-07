@@ -1,6 +1,8 @@
 # Backend Overview
 
-The backend is a FastAPI application that accepts an uploaded GAA football video, runs YOLO+BotSort tracking to detect and identify players across frames, computes perspective-correcting homographies from user-supplied pitch annotations, maps every player detection to a fixed 2D pitch canvas, then interpolates and smoothes the resulting trajectories for playback in the frontend.
+The backend is a FastAPI application that accepts an uploaded GAA football video, runs YOLO+BotSort tracking to detect and identify players across frames, computes perspective-correcting homographies from user-supplied pitch annotations, maps every player detection to a fixed 2D pitch canvas, interpolates and smoothes the resulting trajectories, classifies players by team using jersey colour, and computes spatial KPIs — all for playback and analysis in the frontend.
+
+HTTP endpoints are split into six router files under `routes/`. Pipeline logic lives in `pipeline/` (pure Python/NumPy/OpenCV, no HTTP concerns). All disk I/O is centralised in `pipeline/persistence.py`.
 
 ---
 
@@ -14,7 +16,8 @@ The backend is a FastAPI application that accepts an uploaded GAA football video
 
 2. Track
    POST /videos/{id}/track
-   → run YOLO+BotSort (remote GPU via Modal or local CPU fallback)
+   → lazy-import gpu_inference.get_gpu_client()
+   → dispatch base64-encoded video to Modal T4 GPU
    → produce List[Detection]  (frame_idx, track_id, bbox, confidence, class)
    → persist to TRACKS_DIR/{id}.json
 

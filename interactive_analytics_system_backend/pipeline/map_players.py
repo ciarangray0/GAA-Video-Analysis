@@ -6,11 +6,11 @@ Coordinate System:
 - Output: Pitch canvas pixels (e.g., 850 × 1400 fixed canvas)
 """
 import logging
-from collections import defaultdict
-from typing import List, Dict, Optional, Set
-import numpy as np
-from pipeline.homography import map_pixel_to_pitch
+from typing import Dict, List, Optional, Set
 
+import numpy as np
+
+from pipeline.homography import map_pixel_to_pitch
 from pipeline.schemas import Detection, PlayerPitchPosition, CLASS_BALL, CLASS_REFEREE
 
 logger = logging.getLogger(__name__)
