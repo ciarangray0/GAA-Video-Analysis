@@ -7,14 +7,26 @@ The `pipeline/` package contains all the data-processing logic. It is deliberate
 ## Module Dependency Graph
 
 ```
-app.py
+app.py  (creates FastAPI app, registers routers from routes/)
+ │
+ routes/
+ ├── routes.videos        → pipeline.video, pipeline.rendering, pipeline.persistence
+ ├── routes.detection     → gpu_inference (lazy import), pipeline.persistence
+ │                              gpu_inference  (GPUInferenceClient for Modal)
+ ├── routes.homography    → pipeline.homography, pipeline.constrained_homography,
+ │                              pipeline.persistence
+ ├── routes.mapping       → pipeline.map_players, pipeline.trajectories,
+ │                              pipeline.persistence
+ ├── routes.classification → pipeline.team_classifier, pipeline.persistence
+ └── routes.kpi           → pipeline.kpi, pipeline.persistence
+ │
+ pipeline/
  ├── pipeline.config          (OUT_W, OUT_H, YOLO_MODEL_PATH, DEFAULT_CONF)
- ├── pipeline.schemas         (Pydantic models for all pipeline types)
  ├── pipeline.gaa_pitch_config (pitch geometry: vertices, lines, sidelines)
+ ├── pipeline.schemas         (Pydantic models for all pipeline types)
+ ├── pipeline.persistence     (all disk I/O: save/load JSON, homographies, annotations)
  ├── pipeline.video           (get_video_metadata, extract_frame)
  ├── pipeline.rendering       (warp_frame)
- ├── pipeline.detect          (run_tracking → local or remote)
- │    └── gpu_inference        (GPUInferenceClient for Modal)
  ├── pipeline.homography      (compute_homographies_with_lines_v3, resolve_pitch_coordinates)
  │    ├── pipeline.config
  │    ├── pipeline.gaa_pitch_config
@@ -40,9 +52,9 @@ app.py
 | `config.py` | Canvas size constants, model path, tracking confidence |
 | `gaa_pitch_config.py` | All pitch geometry: vertices, horizontal lines, vertical sidelines |
 | `schemas.py` | Pydantic models: annotations in, positions + detections out; team override request |
+| `persistence.py` | All disk I/O: save/load detections, homographies, annotations, team classifications |
 | `video.py` | OpenCV wrappers: metadata extraction, single-frame extraction |
 | `rendering.py` | `warp_frame` — `cv2.warpPerspective` wrapper |
-| `detect.py` | `run_tracking` — dispatches to remote GPU or local CPU |
 | `homography.py` | Anchor H computation (RANSAC + weighted DLT), `resolve_pitch_coordinates`, `map_pixel_to_pitch` |
 | `line_constraints.py` | `sample_points_on_line`, re-exports `GAA_PITCH_LINES`, `GAA_PITCH_SIDELINES` |
 | `constrained_homography.py` | `build_optical_flow_per_frame_H` — LK flow, drift correction, SG smoothing |
@@ -72,9 +84,10 @@ All frame indices are 0-based integers. Dictionaries keyed by frame index use `i
 ## How Modules Chain Together (Processing Order)
 
 ```
-1. video.py        extract_frame / get_video_metadata
-2. detect.py       run_tracking  → List[Detection]
-3. homography.py   compute_homographies_with_lines_v3
+1. video.py         extract_frame / get_video_metadata
+2. gpu_inference/   get_gpu_client().track_video()  → List[Detection]
+   (dispatched from routes/detection.py — no detect.py in pipeline/ any more)
+3. homography.py    compute_homographies_with_lines_v3
                    → Dict[frame_idx, H]  (anchor frames only)
 4. constrained_homography.py
                    build_optical_flow_per_frame_H

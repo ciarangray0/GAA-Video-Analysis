@@ -1,9 +1,7 @@
 """Configuration constants for the video analysis pipeline."""
 import os
 
-# Output canvas dimensions (pixels) - 10:1 scale from meters
-OUT_W = 850
-OUT_H = 1400
+from pipeline.gaa_pitch_config import CANVAS_W as OUT_W, CANVAS_H as OUT_H  # noqa: F401
 
 # YOLO model path from environment variable
 YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "models/v8s_960_v9.pt")

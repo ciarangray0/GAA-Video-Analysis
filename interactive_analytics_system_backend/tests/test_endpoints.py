@@ -2,8 +2,10 @@ from io import BytesIO
 
 
 def test_upload_video_and_track(client, sample_video_metadata, monkeypatch, sample_detections):
-    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
-    monkeypatch.setattr("app.run_tracking", lambda path: sample_detections, raising=False)
+    class _FakeClient:
+        provider = type('P', (), {'value': 'test'})()
+        def track_video(self, path): return sample_detections
+    monkeypatch.setattr("gpu_inference.get_gpu_client", lambda: _FakeClient())
 
     fake_file = BytesIO(b"fake mp4 data")
     response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
@@ -31,7 +33,10 @@ def test_map_players_and_interpolate_full_flow(
     client, monkeypatch, sample_video_metadata, sample_detections,
     sample_anchor_frame_annotations, sample_homography, sample_positions
 ):
-    monkeypatch.setattr("pipeline.detect.run_tracking", lambda path: sample_detections)
+    class _FakeClient:
+        provider = type('P', (), {'value': 'test'})()
+        def track_video(self, path): return sample_detections
+    monkeypatch.setattr("gpu_inference.get_gpu_client", lambda: _FakeClient())
 
     fake_file = BytesIO(b"fake mp4 data")
     r = client.post("/videos", files={"file": ("v.mp4", fake_file, "video/mp4")})
@@ -63,7 +68,7 @@ def test_get_frame_video_not_found(client):
 
 
 def test_get_frame_invalid_frame_index(client, sample_video_metadata, monkeypatch):
-    monkeypatch.setattr("app.extract_frame", lambda path, idx: b"fake jpeg data")
+    monkeypatch.setattr("routes.videos.extract_frame", lambda path, idx: b"fake jpeg data")
 
     fake_file = BytesIO(b"fake mp4 data")
     response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})
@@ -75,7 +80,7 @@ def test_get_frame_invalid_frame_index(client, sample_video_metadata, monkeypatc
 
 def test_get_frame_success(client, sample_video_metadata, monkeypatch):
     fake_jpeg = b"\xff\xd8\xff\xe0fake jpeg data"
-    monkeypatch.setattr("app.extract_frame", lambda path, idx: fake_jpeg)
+    monkeypatch.setattr("routes.videos.extract_frame", lambda path, idx: fake_jpeg)
 
     fake_file = BytesIO(b"fake mp4 data")
     response = client.post("/videos", files={"file": ("test.mp4", fake_file, "video/mp4")})

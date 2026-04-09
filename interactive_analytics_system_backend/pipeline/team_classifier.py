@@ -9,10 +9,11 @@ Grass sits at H=35-40, providing a clean gap.
 
 All thresholds are tunable constants at the top of this file.
 """
-import cv2
-import numpy as np
 import logging
 from typing import Dict, List
+
+import cv2
+import numpy as np
 
 from pipeline.schemas import Detection
 

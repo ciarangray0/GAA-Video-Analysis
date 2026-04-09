@@ -1,39 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
-import type { VideoMetadata, AnchorFrame, PlayerPosition, AnchorFrameAnnotation } from '../types'
-import { API_URL, getDetections, mapPlayers, interpolateTrajectories, getPlayerPositions } from '../lib/api'
+import type { VideoMetadata, AnchorFrame, PlayerPosition, AnchorFrameAnnotation, AnchorQualityData, HomographyComputeResult } from '../types'
+import { API_URL, trackVideo, getDetections, mapPlayers, interpolateTrajectories, getPlayerPositions, computeHomographies, getAnchorQuality } from '../lib/api'
+import { reprErrorLabel, reprErrorColor, qualityBadge, qualityColor, verdictBadge, impactColor } from '../utils/formatters'
 
-interface StepBResult {
-  frames: number[]
-  per_frame_count: number
-  info: Record<string, any>
-}
-
-
-interface AnchorQualityPoint {
-  pitch_id: string
-  x_img: number
-  y_img: number
-  error_px: number
-  verdict: 'good' | 'high' | 'outlier'
-  impact: 'helpful' | 'marginal' | 'harmful'
-}
-
-interface AnchorQualityFrame {
-  frame_idx: number
-  n_keypoints: number
-  n_lines: number
-  mean_error_px: number
-  max_error_px: number
-  n_outlier_points: number
-  n_helpful_points: number
-  overall_quality: 'good' | 'warning' | 'bad'
-  keypoints: AnchorQualityPoint[]
-  recommendation: string
-}
-
-interface AnchorQualityData {
-  anchors: AnchorQualityFrame[]
-}
+type StepBResult = HomographyComputeResult
 
 interface PipelineStepsProps {
   videoMetadata: VideoMetadata | null
@@ -54,44 +24,6 @@ interface PipelineStepsProps {
   onError: (msg: string) => void
   onStatusChange: (msg: string) => void
   logApiCall: (entry: string) => void
-}
-
-function reprErrorLabel(val: number | undefined): string {
-  if (val === undefined) return '—'
-  if (val < 10) return `${val}px ✓`
-  if (val < 20) return `${val}px ⚠`
-  return `${val}px ✗`
-}
-
-function reprErrorColor(val: number | undefined): string {
-  if (val === undefined) return ''
-  if (val < 10) return '#2d7a2d'
-  if (val < 20) return '#b8860b'
-  return '#cc2222'
-}
-
-function qualityBadge(q: string): string {
-  if (q === 'good') return '✅ good'
-  if (q === 'warning') return '⚠️ warning'
-  return '❌ bad'
-}
-
-function qualityColor(q: string): string {
-  if (q === 'good') return '#2d7a2d'
-  if (q === 'warning') return '#b8860b'
-  return '#cc2222'
-}
-
-function verdictBadge(v: string): string {
-  if (v === 'good') return '✓'
-  if (v === 'high') return '⚠'
-  return '✗'
-}
-
-function impactColor(impact: string): string {
-  if (impact === 'helpful') return '#2d7a2d'
-  if (impact === 'marginal') return '#b8860b'
-  return '#cc2222'
 }
 
 export default function PipelineSteps({
@@ -124,47 +56,31 @@ export default function PipelineSteps({
   const [maxVelPx, setMaxVelPx] = useState(4.0)
   // Step B distortion mode: 0=none, 1=after H, 2=integrated
 
-  const apiFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
-    const method = options?.method || 'GET'
-    logApiCall(`→ ${method} ${url}`)
-    const start = Date.now()
-    try {
-      const res = await fetch(url, options)
-      logApiCall(`← ${res.status} (${Date.now() - start}ms)`)
-      return res
-    } catch (err) {
-      logApiCall(`✗ ${String(err)}`)
-      throw err
-    }
-  }, [logApiCall])
-
   const runStepA = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
     onRunningStepChange('A', 'add')
     onError('')
     try {
-      const res = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/track`, { method: 'POST' })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Tracking failed')
-      }
-      const data = await res.json()
+      logApiCall(`→ POST ${API_URL}/videos/${videoMetadata.video_id}/track`)
+      const start = Date.now()
+      const data = await trackVideo(videoMetadata.video_id)
+      logApiCall(`← ok (${Date.now() - start}ms)`)
       const detections = await getDetections(videoMetadata.video_id)
       onStepAComplete({ frames_processed: data.frames_processed, tracks: data.tracks, num_detections: detections.length })
-      onStepsMarkedStale(['B', 'C', 'D'])
+      onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['A'])
     } catch (err: any) {
+      logApiCall(`✗ ${String(err)}`)
       onError(err.message || 'Tracking failed')
     } finally {
       onRunningStepChange('A', 'remove')
     }
-  }, [videoMetadata, apiFetch, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, logApiCall, onStepAComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepB = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
 
-    // A frame is usable if it has any manual points OR any line annotations —
-    // line intersections will derive the required keypoints automatically.
+    // A frame is usable if it has any manual points OR any line annotations
     const validAnnotations: AnchorFrameAnnotation[] = anchorFrames
       .filter(af => !af.isSkipped && (af.points.length > 0 || (af.lines || []).length > 0))
       .map(af => ({ frame_idx: af.frame_idx, points: af.points, lines: af.lines || [] }))
@@ -179,47 +95,33 @@ export default function PipelineSteps({
     setAnchorQuality(null)
     setAnchorQualityError(null)
     try {
-      const endpoint = `${API_URL}/videos/${videoMetadata.video_id}/homographies/v3`
-
-      const res = await apiFetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(validAnnotations),
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Homography computation failed')
-      }
-      const data = await res.json()
-      const result: StepBResult = {
-        frames: data.frames || [],
-        per_frame_count: data.per_frame_count ?? (data.frames || []).length,
-        info: data.info || {},
-      }
-      onStepBComplete(result, data.frames || [])
+      logApiCall(`→ POST ${API_URL}/videos/${videoMetadata.video_id}/homographies/v3`)
+      const start = Date.now()
+      const result = await computeHomographies(videoMetadata.video_id, validAnnotations)
+      logApiCall(`← ok (${Date.now() - start}ms)`)
+      onStepBComplete(result, result.frames)
       setStepBVersion(v => v + 1)
       onStepsMarkedStale(['C', 'D'])
       onStepsClearedStale(['B'])
 
       // Immediately fetch anchor quality so the user sees per-point errors
       try {
-        const qRes = await apiFetch(`${API_URL}/videos/${videoMetadata.video_id}/homographies/anchor-quality`)
-        if (qRes.ok) {
-          const qData: AnchorQualityData = await qRes.json()
-          setAnchorQuality(qData)
-        } else {
-          const qErr = await qRes.json()
-          setAnchorQualityError(qErr.detail || 'Anchor quality fetch failed')
-        }
+        logApiCall(`→ GET ${API_URL}/videos/${videoMetadata.video_id}/homographies/anchor-quality`)
+        const qStart = Date.now()
+        const qData = await getAnchorQuality(videoMetadata.video_id)
+        logApiCall(`← ok (${Date.now() - qStart}ms)`)
+        setAnchorQuality(qData)
       } catch (qe: any) {
+        logApiCall(`✗ ${String(qe)}`)
         setAnchorQualityError(qe.message || 'Anchor quality fetch failed')
       }
     } catch (err: any) {
+      logApiCall(`✗ ${String(err)}`)
       onError(err.message || 'Homography computation failed')
     } finally {
       onRunningStepChange('B', 'remove')
     }
-  }, [videoMetadata, anchorFrames, apiFetch, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
+  }, [videoMetadata, anchorFrames, logApiCall, onStepBComplete, onStepsMarkedStale, onStepsClearedStale, onRunningStepChange, onError])
 
   const runStepC = useCallback(async () => {
     if (!videoMetadata) { onError('Please upload a video first'); return }
@@ -304,7 +206,7 @@ export default function PipelineSteps({
         </button>
         {stepBResult && (
           <div className="step-result">
-            <p>✅ Homographies computed for {stepBResult.frames.length} anchor frames</p>
+            <p>Homographies computed for {stepBResult.frames.length} anchor frames</p>
             <p><strong>Anchor frames:</strong> {stepBResult.frames.join(', ')}</p>
             <p><strong>Per-frame Hs propagated:</strong> {stepBResult.per_frame_count}</p>
 

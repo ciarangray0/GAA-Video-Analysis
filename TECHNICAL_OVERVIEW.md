@@ -37,21 +37,31 @@ A full-stack video analysis system for GAA (Gaelic football) footage. Given an u
 ```
 GAA-Video-Analysis/
 ├── interactive_analytics_system_backend/
-│   ├── app.py                         ← FastAPI application, all HTTP endpoints
-│   ├── store.py                       ← In-memory state container
-│   ├── pipeline/
+│   ├── app.py                         ← FastAPI application: creates app, registers routers
+│   ├── main.py                        ← Uvicorn entry point
+│   ├── store.py                       ← In-memory state container (VideoStore singleton)
+│   ├── routes/                        ← HTTP endpoint handlers (one file per domain)
+│   │   ├── deps.py                    ← Shared dependency: get_video_or_404
+│   │   ├── videos.py                  ← Upload, frame extraction, warped-frame endpoints
+│   │   ├── detection.py               ← Track + detections endpoints
+│   │   ├── homography.py              ← v3 homography compute + anchor-quality endpoints
+│   │   ├── mapping.py                 ← map_players + interpolate + players endpoints
+│   │   ├── classification.py          ← classify-teams + override endpoints
+│   │   └── kpi.py                     ← compute-kpis endpoint
+│   ├── pipeline/                      ← Pure data-processing logic (no FastAPI/HTTP)
 │   │   ├── config.py                  ← Canvas size constants, model path
 │   │   ├── gaa_pitch_config.py        ← Pitch geometry: vertices, lines, sidelines
 │   │   ├── schemas.py                 ← Pydantic models for all data types
+│   │   ├── persistence.py             ← All disk I/O: save/load JSON, homographies, etc.
 │   │   ├── video.py                   ← OpenCV wrappers: metadata + frame extraction
 │   │   ├── rendering.py               ← warp_frame (cv2.warpPerspective wrapper)
-│   │   ├── detect.py                  ← run_tracking: dispatches local or remote GPU
 │   │   ├── homography.py              ← Anchor H computation (v3 DLT algorithm)
 │   │   ├── line_constraints.py        ← sample_points_on_line, re-exports line dicts
 │   │   ├── constrained_homography.py  ← Per-frame H propagation via LK optical flow
 │   │   ├── map_players.py             ← Filter detections, map bbox → pitch coords
 │   │   ├── trajectories.py            ← Linear interp → SG smooth → velocity clamp
-│   │   └── team_classifier.py         ← Jersey-colour HSV classification per track
+│   │   ├── team_classifier.py         ← Jersey-colour HSV classification per track
+│   │   └── kpi.py                     ← Spatial KPI computation
 │   └── gpu_inference/
 │       ├── __init__.py                ← GPUInferenceClient (HTTP client for Modal)
 │       └── modal_yolo.py              ← Modal serverless GPU service definition
@@ -69,6 +79,10 @@ GAA-Video-Analysis/
 │   │   ├── api.ts                     ← All backend API call functions
 │   │   ├── pitch.ts                   ← Canvas drawing: pitch diagram + results view
 │   │   └── constants.ts               ← Pitch vertices, line segments, display scale
+│   ├── utils/
+│   │   ├── canvasUtils.ts             ← drawCrosshair annotation marker helper
+│   │   ├── formatters.ts              ← Homography quality display formatting
+│   │   └── kpiUtils.ts                ← KPI zone analysis, depth sentence, team colour
 │   └── types/
 │       └── index.ts                   ← TypeScript interfaces
 │
@@ -188,9 +202,9 @@ On `POST /videos`, the backend:
 
 ### 4.2 Player Detection & Tracking (YOLO + BotSort)
 
-**File:** `pipeline/detect.py`
+**File:** `routes/detection.py` → dispatches to `gpu_inference/`
 
-On `POST /videos/{id}/track`, the backend runs `run_tracking(video_path)`. This is **idempotent** — if detections already exist on disk, they are loaded rather than recomputed.
+On `POST /videos/{id}/track`, the route handler checks if detections already exist on disk (idempotent — won't re-run tracking if they do). If not, it lazily imports `gpu_inference.get_gpu_client()` and calls `client.track_video(video_path)`.
 
 **Model:** Custom YOLOv8-small (`v8s_960_v9.pt`) trained at 960px input on GAA footage. Three detection classes:
 - `"GAA-player-lablers"` — players

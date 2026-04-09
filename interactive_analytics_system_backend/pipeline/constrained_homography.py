@@ -3,9 +3,11 @@
 build_optical_flow_per_frame_H — LK optical flow with drift correction + SG smoothing.
 """
 import logging
+from typing import Dict, List, Optional, Tuple
+
 import cv2
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from scipy.signal import savgol_filter
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,15 @@ def _lk_inter_frame_H(
         winSize=_LK_WIN_SIZE, maxLevel=_LK_MAX_LEVEL,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
     )
+    """
+    The core LK assumption: For a small patch around a feature point, the same pattern appears in both frames, just shifted by (dx, dy).
+    If I(x, y, t) is the pixel intensity at position (x,y) at time t, then:
+    I(x, y, t) ≈ I(x + dx, y + dy, t + 1)
+    This is the "brightness constancy assumption." Taylor-expanding the right side and simplifying gives:
+    Iₓ · dx + Iy · dy + It = 0
+    where Iₓ, Iy are spatial gradients and It is the temporal gradient (change in brightness between frames). 
+    This is one equation in two unknowns (dx, dy). To solve it, LK assumes all pixels within a window share the same (dx, dy) and sets up a least-squares system over all pixels in the window.
+    """
 
     pts2, st_fwd, _ = cv2.calcOpticalFlowPyrLK(g1, g2, pts1, None, **lk_params)
     if pts2 is None:
@@ -97,8 +108,6 @@ def build_optical_flow_per_frame_H(
         per_frame_H: {frame_idx: 3×3 H} for every frame 0..total_frames-1.
         info:        Diagnostic dict.
     """
-    from scipy.signal import savgol_filter
-
     anchor_list = sorted(anchor_homographies.keys())
     if not anchor_list:
         return {}, {}
@@ -182,12 +191,12 @@ def build_optical_flow_per_frame_H(
             else:
                 try:
                     H_inv = np.linalg.inv(H_tf)
-                    H_new = H_chain[t - 1] @ H_inv
+                    H_new = H_chain[t - 1] @ H_inv #undo camera motion for the homography
                     if abs(H_new[2, 2]) > 1e-10:
-                        H_new = H_new / H_new[2, 2]
+                        H_new = H_new / H_new[2, 2] #normalize to keep H[2,2] = 1 for stability
                     H_chain[t] = H_new
                 except np.linalg.LinAlgError:
-                    H_chain[t] = H_chain[t - 1].copy()
+                    H_chain[t] = H_chain[t - 1].copy() #freeze in place rather than crash if lk fails
 
         # --- Drift correction: linearly blend H_drift over the segment ---
         H_chain_B = H_chain[B]

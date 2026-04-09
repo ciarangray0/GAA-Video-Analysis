@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 class GPUProvider(str, Enum):
     """Supported GPU inference providers."""
     MODAL = "modal"
-    RUNPOD = "runpod"
 
 
 class GPUInferenceClient:

@@ -12,7 +12,6 @@ eggs/
 .eggs/
 lib/
 lib64/
-!Interactive_analytics_system_frontend/lib/
 parts/
 sdist/
 var/
@@ -83,5 +82,12 @@ node_modules/
 out/
 .vercel
 package-lock.json
+
+#research files
+.txt
+.png
+.csv
+.jpg
+
 
 

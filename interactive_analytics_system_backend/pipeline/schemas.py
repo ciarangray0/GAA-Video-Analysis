@@ -97,11 +97,6 @@ class TrackResponse(BaseModel):
     tracks: int
 
 
-class HomographyResponse(BaseModel):
-    """Response after computing homographies."""
-    frames: List[int]
-
-
 class InterpolationResponse(BaseModel):
     """Response after interpolating trajectories."""
     frames_generated: int

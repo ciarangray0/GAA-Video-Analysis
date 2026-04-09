@@ -175,66 +175,6 @@ class TestGPUInferenceClient:
         # Client should be closed after exiting context
 
 
-class TestDetectModule:
-    """Tests for the detect module."""
-
-    def test_run_tracking_uses_gpu_when_provider_set(self, monkeypatch, tmp_path):
-        """Test that run_tracking uses GPU client when GPU_PROVIDER is set."""
-        # Create fake video
-        video_file = tmp_path / "test.mp4"
-        video_file.write_bytes(b"fake video data")
-
-        monkeypatch.setenv("GPU_PROVIDER", "modal")
-        monkeypatch.setenv("GPU_ENDPOINT_URL", "https://test.modal.run")
-
-        # Import Detection here to avoid import issues
-        from pipeline.schemas import Detection
-
-        # Mock the GPU client
-        mock_detections = [
-            Detection(frame_idx=0, track_id=1, x1=100, y1=100, x2=200, y2=200, confidence=0.9)
-        ]
-
-        mock_client = Mock()
-        mock_client.track_video.return_value = mock_detections
-        mock_client.provider = Mock()
-        mock_client.provider.value = "modal"
-
-        # Reset the singleton
-        import gpu_inference
-        gpu_inference._gpu_client = None
-
-        with patch("gpu_inference.get_gpu_client", return_value=mock_client):
-            from pipeline.detect import run_tracking
-            detections = run_tracking(str(video_file))
-
-        assert len(detections) == 1
-        assert detections[0].track_id == 1
-
-    def test_run_tracking_local_fallback(self, monkeypatch, tmp_path):
-        """Test that run_tracking falls back to local when GPU_PROVIDER=local."""
-        monkeypatch.setenv("GPU_PROVIDER", "local")
-
-        # Create fake video
-        video_file = tmp_path / "test.mp4"
-        video_file.write_bytes(b"fake video data")
-
-        # Import Detection here
-        from pipeline.schemas import Detection
-
-        # Mock the local tracking function
-        mock_detections = [
-            Detection(frame_idx=0, track_id=1, x1=100, y1=100, x2=200, y2=200, confidence=0.9)
-        ]
-
-        with patch("pipeline.detect._run_tracking_local", return_value=mock_detections) as mock_local:
-            from pipeline.detect import run_tracking
-            detections = run_tracking(str(video_file))
-
-        mock_local.assert_called_once()
-        assert len(detections) == 1
-
-
 class TestGetGpuClient:
     """Tests for get_gpu_client function."""
 

@@ -5,19 +5,14 @@ import {
   GAA_PITCH_WIDTH,
   GAA_PITCH_LENGTH,
   GAA_PITCH_VERTICES,
+  GAA_PITCH_LINES,
+  GAA_PITCH_SIDELINES,
+  PITCH_SYMMETRIC_LINE_PAIRS,
   PITCH_LINE_SEGMENTS,
   PITCH_CANVAS_W,
   PITCH_CANVAS_H,
   DISPLAY_SCALE,
-} from './constants'
-
-// Symmetric horizontal line pairs (top_y, bottom_y) in meters
-const PITCH_HORIZONTAL_LINES = [
-  [13, 127],
-  [20, 120],
-  [45,  95],
-  [65,  75],
-] as const
+} from './pitchConfig'
 
 export function pitchToCanvas(pitchX: number, pitchY: number): { x: number; y: number } {
   return {
@@ -60,15 +55,15 @@ export function drawPitchDiagram(
   ctx.lineWidth = 2
   ctx.strokeRect(0, 0, PITCH_DISPLAY_WIDTH, PITCH_DISPLAY_HEIGHT)
 
-  // Center line
-  const centerY = pitchToCanvas(0, 70).y
+  // Center (halfway) line
+  const centerY = pitchToCanvas(0, GAA_PITCH_LINES['halfway']).y
   ctx.beginPath()
   ctx.moveTo(0, centerY)
   ctx.lineTo(PITCH_DISPLAY_WIDTH, centerY)
   ctx.stroke()
 
-  // Horizontal line pairs (13m, 20m, 45m, 65m)
-  for (const [top, bottom] of PITCH_HORIZONTAL_LINES) {
+  // Symmetric horizontal line pairs (13m, 20m, 45m, 65m)
+  for (const [top, bottom] of PITCH_SYMMETRIC_LINE_PAIRS) {
     drawHorizontalLinePair(
       ctx,
       pitchToCanvas(0, top).y,
@@ -78,35 +73,27 @@ export function drawPitchDiagram(
   }
 
   // 13m box vertical lines
-  const box13Left = pitchToCanvas(33, 0).x
-  const box13Right = pitchToCanvas(52, 0).x
-  const line13Top = pitchToCanvas(0, 13).y
-  const line13Bottom = pitchToCanvas(0, 127).y
+  const box13Left   = pitchToCanvas(GAA_PITCH_SIDELINES['13m_box_left'],  0).x
+  const box13Right  = pitchToCanvas(GAA_PITCH_SIDELINES['13m_box_right'], 0).x
+  const line13Top   = pitchToCanvas(0, GAA_PITCH_LINES['13m_top']).y
+  const line13Bottom = pitchToCanvas(0, GAA_PITCH_LINES['13m_bottom']).y
   ctx.beginPath()
-  ctx.moveTo(box13Left, 0)
-  ctx.lineTo(box13Left, line13Top)
-  ctx.moveTo(box13Right, 0)
-  ctx.lineTo(box13Right, line13Top)
-  ctx.moveTo(box13Left, line13Bottom)
-  ctx.lineTo(box13Left, PITCH_DISPLAY_HEIGHT)
-  ctx.moveTo(box13Right, line13Bottom)
-  ctx.lineTo(box13Right, PITCH_DISPLAY_HEIGHT)
+  ctx.moveTo(box13Left,  0);             ctx.lineTo(box13Left,  line13Top)
+  ctx.moveTo(box13Right, 0);             ctx.lineTo(box13Right, line13Top)
+  ctx.moveTo(box13Left,  line13Bottom);  ctx.lineTo(box13Left,  PITCH_DISPLAY_HEIGHT)
+  ctx.moveTo(box13Right, line13Bottom);  ctx.lineTo(box13Right, PITCH_DISPLAY_HEIGHT)
   ctx.stroke()
 
   // Goalie box
-  const goalieLeft = pitchToCanvas(35.5, 0).x
-  const goalieRight = pitchToCanvas(49.5, 0).x
-  const goalieTop = pitchToCanvas(0, 4.5).y
-  const goalieBottom = pitchToCanvas(0, 135.5).y
+  const goalieLeft   = pitchToCanvas(GAA_PITCH_VERTICES['left_box_top'][0],  0).x
+  const goalieRight  = pitchToCanvas(GAA_PITCH_VERTICES['right_box_top'][0], 0).x
+  const goalieTop    = pitchToCanvas(0, GAA_PITCH_LINES['small_rectangle_top']).y
+  const goalieBottom = pitchToCanvas(0, GAA_PITCH_LINES['small_rectangle_bottom']).y
   ctx.beginPath()
-  ctx.moveTo(goalieLeft, 0)
-  ctx.lineTo(goalieLeft, goalieTop)
-  ctx.lineTo(goalieRight, goalieTop)
-  ctx.lineTo(goalieRight, 0)
-  ctx.moveTo(goalieLeft, PITCH_DISPLAY_HEIGHT)
-  ctx.lineTo(goalieLeft, goalieBottom)
-  ctx.lineTo(goalieRight, goalieBottom)
-  ctx.lineTo(goalieRight, PITCH_DISPLAY_HEIGHT)
+  ctx.moveTo(goalieLeft, 0);                 ctx.lineTo(goalieLeft,  goalieTop)
+  ctx.lineTo(goalieRight, goalieTop);        ctx.lineTo(goalieRight, 0)
+  ctx.moveTo(goalieLeft, PITCH_DISPLAY_HEIGHT); ctx.lineTo(goalieLeft,  goalieBottom)
+  ctx.lineTo(goalieRight, goalieBottom);     ctx.lineTo(goalieRight, PITCH_DISPLAY_HEIGHT)
   ctx.stroke()
 
   const currentAnchor = anchorFrames[currentAnchorIdx]
@@ -207,37 +194,38 @@ export function drawPitch(
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)'
   ctx.lineWidth = 1
 
-  // Center line
+  // Center (halfway) line
+  const halfwayY = (GAA_PITCH_LINES['halfway'] / GAA_PITCH_LENGTH) * H
   ctx.beginPath()
-  ctx.moveTo(0, H / 2)
-  ctx.lineTo(W, H / 2)
+  ctx.moveTo(0, halfwayY)
+  ctx.lineTo(W, halfwayY)
   ctx.stroke()
 
   // 20m semicircles (radius 13m, curving into pitch)
-  const arcR = (13 / GAA_PITCH_LENGTH) * H
+  const arcR  = (13 / GAA_PITCH_LENGTH) * H
   const arcCx = W / 2
   ctx.beginPath()
-  ctx.arc(arcCx, (20 / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, false)
+  ctx.arc(arcCx, (GAA_PITCH_LINES['20m_top']    / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, false)
   ctx.stroke()
   ctx.beginPath()
-  ctx.arc(arcCx, (120 / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, true)
+  ctx.arc(arcCx, (GAA_PITCH_LINES['20m_bottom'] / GAA_PITCH_LENGTH) * H, arcR, 0, Math.PI, true)
   ctx.stroke()
 
-  // Symmetric horizontal line pairs (13m, 20m, 45m)
-  for (const y_m of [13, 20, 45, 65] as const) {
+  // Symmetric horizontal line pairs (13m, 20m, 45m, 65m)
+  for (const [top, bottom] of PITCH_SYMMETRIC_LINE_PAIRS) {
     drawHorizontalLinePair(
       ctx,
-      (y_m / GAA_PITCH_LENGTH) * H,
-      ((GAA_PITCH_LENGTH - y_m) / GAA_PITCH_LENGTH) * H,
+      (top    / GAA_PITCH_LENGTH) * H,
+      (bottom / GAA_PITCH_LENGTH) * H,
       W,
     )
   }
 
   // 13m box vertical lines (x=33m, x=52m, from endline to 13m line)
-  const box13L = (33 / GAA_PITCH_WIDTH) * W
-  const box13R = (52 / GAA_PITCH_WIDTH) * W
-  const y13top = (13 / GAA_PITCH_LENGTH) * H
-  const y13bot = (127 / GAA_PITCH_LENGTH) * H
+  const box13L = (GAA_PITCH_SIDELINES['13m_box_left']  / GAA_PITCH_WIDTH) * W
+  const box13R = (GAA_PITCH_SIDELINES['13m_box_right'] / GAA_PITCH_WIDTH) * W
+  const y13top = (GAA_PITCH_LINES['13m_top']    / GAA_PITCH_LENGTH) * H
+  const y13bot = (GAA_PITCH_LINES['13m_bottom'] / GAA_PITCH_LENGTH) * H
   ctx.beginPath()
   ctx.moveTo(box13L, 0);    ctx.lineTo(box13L, y13top)
   ctx.moveTo(box13R, 0);    ctx.lineTo(box13R, y13top)
@@ -245,11 +233,11 @@ export function drawPitch(
   ctx.moveTo(box13R, y13bot); ctx.lineTo(box13R, H)
   ctx.stroke()
 
-  // Small (goalie) box (x=35.5m–49.5m, depth=4.5m from endline)
-  const boxSL = (35.5 / GAA_PITCH_WIDTH) * W
-  const boxSR = (49.5 / GAA_PITCH_WIDTH) * W
-  const ySTop = (4.5 / GAA_PITCH_LENGTH) * H
-  const ySBot = (135.5 / GAA_PITCH_LENGTH) * H
+  // Small (goalie) box
+  const boxSL  = (GAA_PITCH_VERTICES['left_box_top'][0]  / GAA_PITCH_WIDTH) * W
+  const boxSR  = (GAA_PITCH_VERTICES['right_box_top'][0] / GAA_PITCH_WIDTH) * W
+  const ySTop  = (GAA_PITCH_LINES['small_rectangle_top']    / GAA_PITCH_LENGTH) * H
+  const ySBot  = (GAA_PITCH_LINES['small_rectangle_bottom'] / GAA_PITCH_LENGTH) * H
   ctx.beginPath()
   ctx.moveTo(boxSL, 0);  ctx.lineTo(boxSL, ySTop); ctx.lineTo(boxSR, ySTop); ctx.lineTo(boxSR, 0)
   ctx.moveTo(boxSL, H);  ctx.lineTo(boxSL, ySBot); ctx.lineTo(boxSR, ySBot); ctx.lineTo(boxSR, H)
@@ -287,8 +275,6 @@ export function drawPitch(
       // Sort by frame so the line goes in temporal order
       pts.sort((a, b) => a.frame_idx - b.frame_idx)
 
-      // Parse team colour to draw the trail in a matching shade
-      // Use the same colour string at low alpha for the trail
       ctx.save()
       ctx.globalAlpha = 0.35
       ctx.strokeStyle = color

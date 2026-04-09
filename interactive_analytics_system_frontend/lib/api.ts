@@ -1,7 +1,20 @@
-import type { VideoMetadata, PlayerPosition, AnchorFrameAnnotation, ClassifyTeamsResponse, TeamClassifications, KpiSummary } from '../types'
+import type {
+  VideoMetadata,
+  PlayerPosition,
+  AnchorFrameAnnotation,
+  ClassifyTeamsResponse,
+  TeamClassifications,
+  KpiSummary,
+  AnchorQualityData,
+  HomographyComputeResult,
+} from '../types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+/**
+ * Upload an MP4 video file and return its metadata (id, fps, dimensions).
+ * Throws on non-2xx responses.
+ */
 export async function uploadVideo(file: File): Promise<VideoMetadata> {
   const formData = new FormData()
   formData.append('file', file)
@@ -13,6 +26,7 @@ export async function uploadVideo(file: File): Promise<VideoMetadata> {
   return res.json()
 }
 
+/** Run YOLO + BotSort tracking on a video. Returns frame/track counts. */
 export async function trackVideo(videoId: string): Promise<{ frames_processed: number; tracks: number }> {
   const res = await fetch(`${API_URL}/videos/${videoId}/track`, { method: 'POST' })
   if (!res.ok) {
@@ -22,29 +36,17 @@ export async function trackVideo(videoId: string): Promise<{ frames_processed: n
   return res.json()
 }
 
+/** Fetch raw YOLO+BotSort detections for a video. */
 export async function getDetections(videoId: string): Promise<any[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/detections`)
-  if (!res.ok) return []
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Failed to fetch detections')
+  }
   return res.json()
 }
 
-export async function computeHomographiesV2(
-  videoId: string,
-  annotations: AnchorFrameAnnotation[],
-): Promise<{ frames: number[]; info: Record<string, any> }> {
-  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/v2`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(annotations),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.detail || 'Homography computation failed')
-  }
-  const data = await res.json()
-  return { frames: data.frames || [], info: data.info || {} }
-}
-
+/** Map player detections to pitch canvas coordinates via per-frame homography. */
 export async function mapPlayers(videoId: string): Promise<PlayerPosition[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/map_players`, { method: 'POST' })
   if (!res.ok) {
@@ -60,6 +62,10 @@ export interface InterpolationParams {
   maxVelPx?: number       // Max px/frame displacement (default 4, 0 = off)
 }
 
+/**
+ * Interpolate + smooth player trajectories between anchor frames.
+ * Applies Savitzky-Golay smoothing and optional max-velocity clamping.
+ */
 export async function interpolateTrajectories(
   videoId: string,
   startFrame: number,
@@ -81,6 +87,7 @@ export async function interpolateTrajectories(
   return res.json()
 }
 
+/** Fetch all player positions (sparse homography + interpolated) for a video. */
 export async function getPlayerPositions(videoId: string): Promise<PlayerPosition[]> {
   const res = await fetch(`${API_URL}/videos/${videoId}/players`)
   if (!res.ok) {
@@ -90,6 +97,7 @@ export async function getPlayerPositions(videoId: string): Promise<PlayerPositio
   return res.json()
 }
 
+/** Run jersey-colour team classification. Returns per-track assignments and summary stats. */
 export async function classifyTeams(videoId: string): Promise<ClassifyTeamsResponse> {
   const res = await fetch(`${API_URL}/videos/${videoId}/classify-teams`, { method: 'POST' })
   if (!res.ok) {
@@ -99,6 +107,7 @@ export async function classifyTeams(videoId: string): Promise<ClassifyTeamsRespo
   return res.json()
 }
 
+/** Fetch stored team classifications. Returns empty object when none saved yet. */
 export async function getTeamClassifications(videoId: string): Promise<TeamClassifications> {
   const res = await fetch(`${API_URL}/videos/${videoId}/classify-teams`)
   if (!res.ok) return {}
@@ -106,6 +115,7 @@ export async function getTeamClassifications(videoId: string): Promise<TeamClass
   return data.classifications ?? {}
 }
 
+/** Override a single track's team assignment. Returns the updated full classification map. */
 export async function overrideTeamClassification(
   videoId: string,
   trackId: number,
@@ -124,12 +134,51 @@ export async function overrideTeamClassification(
   return data.classifications ?? {}
 }
 
+/**
+ * Compute spatial KPIs for a clip (distances, team spread, centroid separation, zone balance).
+ * @param endFrame - Optional last frame index; trims the clip before computing.
+ */
 export async function computeKpis(videoId: string, endFrame?: number): Promise<KpiSummary> {
   const qs = endFrame !== undefined ? `?end_frame=${endFrame}` : ''
   const res = await fetch(`${API_URL}/videos/${videoId}/compute-kpis${qs}`, { method: 'POST' })
   if (!res.ok) {
     const err = await res.json()
     throw new Error(err.detail || 'KPI computation failed')
+  }
+  return res.json()
+}
+
+/**
+ * Compute anchor homographies (v3 DLT + line constraints) then propagate per-frame
+ * via Lucas-Kanade optical flow. Returns anchor frame list and per-frame count.
+ */
+export async function computeHomographies(
+  videoId: string,
+  annotations: AnchorFrameAnnotation[],
+): Promise<HomographyComputeResult> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/v3`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(annotations),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Homography computation failed')
+  }
+  const data = await res.json()
+  return {
+    frames: data.frames || [],
+    per_frame_count: data.per_frame_count ?? (data.frames || []).length,
+    info: data.info || {},
+  }
+}
+
+/** Fetch per-keypoint reprojection errors for each anchor frame. */
+export async function getAnchorQuality(videoId: string): Promise<AnchorQualityData> {
+  const res = await fetch(`${API_URL}/videos/${videoId}/homographies/anchor-quality`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Anchor quality fetch failed')
   }
   return res.json()
 }

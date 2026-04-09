@@ -1,14 +1,8 @@
 """Point-sampling utilities for homography line constraints."""
 
-from typing import Dict
 import numpy as np
 
 from pipeline.gaa_pitch_config import GAA_PITCH_LINES, GAA_PITCH_SIDELINES
-
-
-def get_available_lines() -> Dict[str, float]:
-    """Return dict of available line IDs and their Y values in meters."""
-    return GAA_PITCH_LINES.copy()
 
 
 # =============================================================================
