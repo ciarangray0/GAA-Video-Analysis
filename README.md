@@ -7,7 +7,7 @@ A full-stack system for analysing GAA (Gaelic football) match footage. Upload an
 ## Screenshots
 
 ### Raw Match Footage
-![Raw match footage](docs/images/raw_footage.png)
+![Raw match footage](docs/images/raw-footage.png)
 *Input: broadcast-quality GAA match footage.*
 
 ### Player Detection & Tracking (YOLO + BotSort)
