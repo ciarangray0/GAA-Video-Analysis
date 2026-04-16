@@ -10,6 +10,8 @@ This repository implements a computer vision pipeline to:
 
 Designed for reproducibility and modular development (detection, tracking, post-processing, analytics).
 
+This Directory contains a series of diagnostic scripts used for debugging and data collection, and a jupyter notebook for research and experimentation with different models, parameters, and techniques.
+
 ## Features
 - Frame extraction from Veo recordings
 - Object detection with configurable models

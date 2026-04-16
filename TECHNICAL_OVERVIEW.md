@@ -19,16 +19,17 @@ A full-stack video analysis system for GAA (Gaelic football) footage. Given an u
    - 4.7 [Player Mapping](#47-player-mapping)
    - 4.8 [Trajectory Interpolation & Smoothing](#48-trajectory-interpolation--smoothing)
    - 4.9 [Results Visualisation (Frontend)](#49-results-visualisation-frontend)
+   - 4.10 [Team Classification](#410-team-classification)
+   - 4.11 [KPI Computation](#411-kpi-computation)
 5. [Data Flow](#5-data-flow)
 6. [In-Memory Store & Persistence](#6-in-memory-store--persistence)
 7. [API Endpoint Reference](#7-api-endpoint-reference)
 8. [Key Libraries & Dependencies](#8-key-libraries--dependencies)
 9. [Configuration & Environment Variables](#9-configuration--environment-variables)
 10. [Frontend Architecture](#10-frontend-architecture)
-11. [Pitch Geometry Reference](#11-pitch-geometry-reference)
-12. [Known Limitations & TODOs](#12-known-limitations--todos)
-13. [Development History — What Was Tried, What Worked, What Didn't](#13-development-history--what-was-tried-what-worked-what-didnt)
-14. [Getting Started for a New Engineer](#14-getting-started-for-a-new-engineer)
+11. [Known Limitations](#12-known-limitations--todos)
+12. [Development History — What Was Tried, What Worked, What Didn't](#13-development-history--what-was-tried-what-worked-what-didnt)
+13. [Code Navigation](#14-getting-started-for-a-new-engineer)
 
 ---
 
@@ -403,8 +404,8 @@ For each inter-anchor segment, each of the 9 H matrix elements is smoothed indep
 
 **Filtering (`filter_detections_for_mapping`):**
 - Drop all detections with `class_name == CLASS_BALL`.
-- Find all `track_id` values that have **any** detection classified as `CLASS_REFEREE`.
-- Drop **all** detections for those track IDs (whole-track removal handles occasional misclassifications).
+- Find all `track_id` values that have **any** detection classified as `CLASS_REFEREE`. Drop **all** detections for those track IDs (whole-track removal handles occasional misclassifications).
+- Drop all tracks with fewer than **25 total raw detections**. At 25fps this is ~1 second of visibility. Shorter tracks are tracker glitches where BotSort briefly assigns a new ID to an object that doesn't persist.
 
 **Mapping (`map_players_to_pitch`):**
 
@@ -495,8 +496,74 @@ video.play().then(() => {
    - If classified as `'opposition'`: blue (`#4488FF`).
    - Otherwise: `hsl((track_id × 137.508) % 360, 70%, 50%)` — the golden angle ensures maximally different hues for adjacent track IDs.
 
-**Team Classification:**
-A "Classify Teams" button calls `POST /videos/{id}/classify-teams`, which runs `team_classifier.classify_tracks` on the server. The result is a per-track dict of `{team, confidence, mean_hsv}`. The frontend shows a team panel grouping tracks by team, with jersey-colour swatches, confidence bars, and team override dropdowns. `hsvToCss` converts OpenCV HSV values to CSS colours for the swatch. Overriding a track calls `PATCH /videos/{id}/classify-teams` immediately.
+---
+
+### 4.10 Team Classification
+
+**File:** `pipeline/team_classifier.py`, `routes/classification.py`
+
+The classifier identifies jersey colour using HSV analysis. Ellistown wear a distinctive orange-yellow jersey (OpenCV HSV hue 14–28). Grass sits at hue 35–40 — a clean separation gap.
+
+**Algorithm (`classify_tracks`):**
+
+1. For each track, select up to 30 evenly-spaced frames from across its full duration.
+2. Build a `frame_idx → [(track_id, bbox), ...]` map grouping all samples by frame. This ensures each frame is decoded exactly once regardless of how many tracks appear in it.
+3. Single sequential forward pass through the video via `cv2.VideoCapture.set(CAP_PROP_POS_FRAMES, frame_idx)`:
+   - For each sampled track in that frame, crop the **top 50%** of the bounding box (jersey region — avoids shorts and grass at the feet).
+   - Convert crop to HSV; mask out low-saturation pixels (glare, shadows: `S < 50`).
+   - Count the fraction of remaining pixels with `H ∈ [14, 28]` and `S ≥ 100` (Ellistown yellow).
+4. Aggregate: mean yellow fraction across all sampled frames. If ≥ 15% → `"ellistown"`, else `"opposition"`. Confidence scales with distance from the threshold.
+
+**Output:** `Dict[track_id, {team, confidence, mean_hsv}]` — saved to disk and loaded into `store.team_classifications_cache`.
+
+**Frontend:** `components/TeamClassificationPanel.tsx` shows jersey-colour swatches (`hsvToCss()` converts OpenCV HSV to CSS `hsl()`), confidence bars, and per-track override dropdowns. Overriding calls `PATCH /videos/{id}/classify-teams` immediately.
+
+**Effect on rendering:** when `teamClassifications` is passed to `drawPitch`, Ellistown tracks are drawn gold (`#FFD700`), opposition blue (`#4488FF`), and `'referee'`/`'ignore'` tracks are hidden entirely.
+
+---
+
+### 4.11 KPI Computation
+
+**File:** `pipeline/kpi.py`, `routes/kpi.py`
+
+KPI computation works entirely on the in-memory `store.player_positions_cache` — no video decoding happens. All computation is pure Python/NumPy on the position arrays.
+
+#### Distance covered (per player)
+
+```python
+dx = np.diff(xs) / PX_PER_METRE    # PX_PER_METRE = 10
+dy = np.diff(ys) / PX_PER_METRE
+total_distance_m = np.sqrt(dx**2 + dy**2).sum()
+```
+
+Simple displacement sum between consecutive positions. Frame gaps spanned by interpolation are handled correctly because only spatial displacement is summed, not speed × time.
+
+#### Team spatial metrics (per frame)
+
+`compute_team_spatial()` computes per team per frame:
+- **Centroid:** mean x and mean y of all player positions in that frame (meters).
+- **Spread (convex hull area):** `scipy.spatial.ConvexHull(arr).volume` — in 2D `volume` is the area in m². Zero if fewer than 3 players visible.
+- **Centroid separation:** Euclidean distance between the two team centroids.
+
+#### Zone balance (per frame)
+
+The pitch is divided into three equal thirds along the y-axis:
+```
+Defensive:  0 – 46.7 m
+Middle:    46.7 – 93.3 m
+Attacking: 93.3 – 140.0 m
+```
+For each frame, count how many players from each team are in each zone.
+
+#### Summary aggregation
+
+Mean/min/max centroid separation across all frames. Mean spread and mean centroid x/y per team. Aggregated zone player counts across all frames.
+
+**Frontend display:**
+- `utils/kpiUtils.ts → computeZoneAnalysis()` identifies the "most active" third (highest combined player count) and highlights it in the zone balance table.
+- `utils/kpiUtils.ts → computeDepthSentence()` produces a plain-English sentence describing how relative team centroid depth changed from clip start to end (e.g. *"Clip start: Opposition 8.3 m goal-side · Clip end: Ellistown 2.1 m goal-side"*).
+- `components/ClipSummaryCard.tsx` — 3-sentence plain-English summary (zone balance, team spread, depth shift).
+- `components/KpiPanel.tsx` — full table: centroid metrics, team spread, zone balance, per-player distance chips.
 
 ---
 
@@ -652,20 +719,17 @@ No external UI component libraries — all canvas drawing is hand-coded using th
 
 ## 9. Configuration & Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GPU_PROVIDER` | `"local"` | `"modal"` for remote GPU, `"local"` for CPU fallback |
-| `GPU_ENDPOINT_URL` | — | Full URL of the deployed Modal endpoint (required when `GPU_PROVIDER=modal`) |
-| `GPU_API_KEY` | — | Optional auth key (not currently used by Modal public endpoints) |
-| `MAX_VIDEO_SIZE_MB` | `500` | Upload size limit |
-| `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS origin list |
-| `DATA_DIR` | `"data"` | Root directory for all persisted files |
-| `YOLO_MODEL_PATH` | `"models/v8s_960_v9.pt"` | Path to YOLO weights for local inference |
+> For the full variable reference, see [`README.md`](../README.md#environment-variables).
 
-**Frontend:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NEXT_PUBLIC_API_URL` | `"http://localhost:8000"` | Backend base URL (set at build time) |
+Key variables used in code:
+
+| Variable | Where read | Purpose |
+|----------|-----------|---------|
+| `GPU_PROVIDER` | `gpu_inference/__init__.py` | Selects inference backend (`"modal"` or `"local"`) |
+| `GPU_ENDPOINT_URL` | `gpu_inference/__init__.py` | Modal HTTP endpoint URL |
+| `DATA_DIR` | `pipeline/persistence.py` | Root path for all disk I/O |
+| `YOLO_MODEL_PATH` | `pipeline/config.py` | YOLO weights path for local inference |
+| `NEXT_PUBLIC_API_URL` | `lib/api.ts` | Backend base URL injected at Next.js build time |
 
 ---
 
@@ -710,51 +774,6 @@ After step B, `stepBVersion` state is incremented. Warped-frame thumbnail `<img>
 
 ---
 
-## 11. Pitch Geometry Reference
-
-A GAA pitch is 85 m wide (x) × 140 m long (y). All features are symmetric across both the x=42.5m centreline and the y=70m halfway line.
-
-```
-y=0   ─────────────── Top endline ────────────────
-      ┌──────────────────────────────────────────┐
-      │   Goal area (4.5m)                       │
-      │  ┌────┐                        ┌────┐    │  y=4.5m
-      │  │    │                        │    │    │
-      │  └────┘                        └────┘    │
-      │                                          │
-      │──────────────────────────────────────────│  y=13m  (13m line)
-      │                                          │
-      │──────────────────────────────────────────│  y=20m  (20m line)
-      │                                          │
-      │         ╭──────────────╮                 │  (20m semicircle, r=13m)
-      │                                          │
-      │──────────────────────────────────────────│  y=45m  (45m line)
-      │                                          │
-      │──────────────────────────────────────────│  y=65m  (65m line)
-      │──────────────────────────────────────────│  y=70m  (halfway)
-      │──────────────────────────────────────────│  y=75m
-      │──────────────────────────────────────────│  y=95m
-      │                                          │
-      │         ╰──────────────╯                 │  (20m semicircle, r=13m)
-      │──────────────────────────────────────────│  y=120m
-      │                                          │
-      │──────────────────────────────────────────│  y=127m
-      │  ┌────┐                        ┌────┐    │
-      │  │    │                        │    │    │  y=135.5m
-      │  └────┘                        └────┘    │
-      │   Goal area (4.5m)                       │
-      └──────────────────────────────────────────┘
-y=140 ─────────────── Bottom endline ─────────────
-      x=0                             x=85m
-      │←─33m─→│←──────19m──────→│←─33m→│
-               x=33m             x=52m   (13m box sides)
-               x=29.5m         x=55.5m  (small arc sides)
-               x=35.5m         x=49.5m  (goalie box)
-               x=39.25m        x=45.75m (goal posts)
-```
-
----
-
 ## 12. Known Limitations & TODOs
 
 ### Algorithmic Limitations
@@ -776,18 +795,6 @@ The user picks one interval (e.g. every 1 second) for all anchor frames. Dense r
 
 **Referee track removal is all-or-nothing.**
 If a player is ever misclassified as a referee by the YOLO model across all their frames, their entire track is dropped. This is a conservative design choice but may occasionally remove real players.
-
-### Implementation TODOs
-
-- **Backend cleanup (active plan):** Replace remaining magic numbers in `homography.py`, `constrained_homography.py`, `trajectories.py`, `line_constraints.py` with named constants. See `CLAUDE.md` for the full phased plan.
-- **No test coverage for `constrained_homography.py`:** The optical flow propagation module has no unit tests. The 70-test suite covers schemas, endpoints, and homography computation but not the LK flow logic.
-- **`computeHomographiesV2` in `api.ts`:** A v2 endpoint function remains in `api.ts` but is never called by `PipelineSteps.tsx` (which calls the v3 endpoint directly via `apiFetch`). It could be removed.
-- **`PitchAnnotation` in `schemas.py`:** A legacy model that is never used by any active endpoint — exists as a type reference only.
-- **No video length limit enforcement beyond file size:** A 500MB file at 25fps could be very long. There is no per-frame limit, but Modal has a 600-second timeout.
-- **Homographies not versioned:** If the user re-annotates and re-runs step B, the new homographies overwrite the old ones with no rollback. Player positions from step C (computed against the old Hs) are now stale — the UI shows a STALE badge but doesn't prevent using stale positions.
-- **`data/` directory not cleaned up:** Old video files and their associated JSON files accumulate indefinitely. No garbage collection or TTL is implemented.
-
----
 
 ## 13. Development History — What Was Tried, What Worked, What Didn't
 
@@ -847,43 +854,9 @@ An experimental `k1` parameter for radial lens distortion was added to the front
 
 ---
 
-## 14. Getting Started on this repo
+## 14. Code Navigation
 
-### Running Locally
-
-**Backend:**
-```bash
-cd interactive_analytics_system_backend
-pip install -r requirements.txt
-uvicorn app:app --reload --port 8000
-```
-
-For GPU inference, set `GPU_PROVIDER=modal` and `GPU_ENDPOINT_URL` after deploying the Modal service.
-
-**Frontend:**
-```bash
-cd interactive_analytics_system_frontend
-npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
-```
-
-### Running Tests
-```bash
-cd interactive_analytics_system_backend
-pytest tests/ -v
-```
-70 tests pass. 1 pre-existing failure: `test_validate_tilted_line_fails` in `test_line_constraints.py` (unrelated to core pipeline).
-
-### Deploying the Modal GPU Service
-```bash
-pip install modal
-modal token new
-modal volume put yolo-model-cache path/to/v8s_960_v9.pt /v8s_960_v9.pt
-modal deploy gpu_inference/modal_yolo.py
-# Copy the printed endpoint URL
-export GPU_ENDPOINT_URL="https://..."
-export GPU_PROVIDER=modal
-```
+> For setup instructions, environment variables, and quick start commands, see the root [`README.md`](../README.md).
 
 ### Where to Look for What
 
@@ -900,19 +873,3 @@ export GPU_PROVIDER=modal
 | How does GPU inference work? | `gpu_inference/OVERVIEW.md` |
 | What endpoints exist and what do they return? | `APP_ENDPOINTS.md`, this document §7 |
 | How is state managed in the frontend? | `OVERVIEW.md` (frontend), `pages/INDEX.md` |
-
-### Common Gotchas
-
-1. **Coordinate system confusion.** Always check whether a position is in image pixels, pitch-canvas pixels, or pitch meters. The debug coordinate table in ResultsViewer (visible in the UI) shows all three for the current frame.
-
-2. **H matrix direction.** All Hs map image → canvas, not canvas → image. If you need the inverse mapping, use `np.linalg.inv(H)`.
-
-3. **JSON string keys.** Frame indices are stored as string keys in JSON (`"0"`, `"25"`, etc.) but as integer keys in Python dicts. `_deserialize_H` handles the conversion; don't assume integer keys when loading from disk.
-
-4. **Class name strings.** The YOLO model class names contain typos (`"Refree-lablers"`, `"GAA-player-lablers"`) that must match exactly. Do not "fix" these.
-
-5. **Smoothing applied to all frames.** The SG filter is intentionally applied to detected frames as well as interpolated gaps. Reverting this causes jitter at anchor frames.
-
-6. **Re-pinning after smoothing.** After applying SG smoothing to H elements, anchor frames must be re-pinned exactly (`per_frame_H[A] = anchor_homographies[A]`). If you skip this, anchor frames are slightly perturbed by the smoothing polynomial.
-
-7. **`outline` vs `border` on annotation canvas.** Any CSS property that affects the border-box width/height of the annotation canvas (including `padding` and `border`) will corrupt click coordinate conversion. Only `outline` is safe.
